@@ -305,7 +305,7 @@ class TextBlock(TextCell):
     # Textual APIs
     #-------------------------------------------------------------------------
 
-    def get_token_at_pos(self, line_num, x_index):
+    def get_token_at_position(self, line_num, x_index):
         """
         Return the token at the given text position.
         """
@@ -313,7 +313,7 @@ class TextBlock(TextCell):
             return None
         return self.lines[line_num].get_token_at_index(x_index)
 
-    def get_address_at_pos(self, line_num, x_index):
+    def get_address_at_position(self, line_num, x_index):
         """
         Return the mapped address of the given text position.
         """

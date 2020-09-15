@@ -14,6 +14,10 @@ from lucid.util.hexrays import get_all_vdui, map_line2citem, map_line2ea
 #    between our Microcode Explorer <--> Hex-Rays and highlighting the 
 #    relevant lines in each view.
 #
+#    IDA provides mechanisms for syncing 'views', but none of that
+#    infrastructure is really usable from idapython. for that reason,
+#    we kind of implement our own which is probably for the best anyway.
+#
 
 class MicroCursorHighlight(object):
 
@@ -40,6 +44,7 @@ class MicroCursorHighlight(object):
         self._sync_status = False
         self._last_vdui = None
         self._code_widget = None
+        self._ignore_move = False
      
         # create hooks
         self._hxe_hooks = self.HxeHooks() 
@@ -89,9 +94,6 @@ class MicroCursorHighlight(object):
         self.refresh_hexrays_cursor()
 
     def refresh_hexrays_cursor(self):
-        """
-        TODO
-        """
         self._hexrays_origin = False
         self._hexrays_addresses = []
 
@@ -120,9 +122,9 @@ class MicroCursorHighlight(object):
         splace = ida_kernwin.place_t_as_simpleline_place_t(place)
         splace.n = line_num
 
-        self.model.ignore_move = True
+        self._ignore_move = True
         ida_kernwin.jumpto(self._last_vdui.ct, splace, x, y)
-        self.model.ignore_move = False
+        self._ignore_move = False
 
         self._hexrays_addresses = addr_map[line_num]
         ida_kernwin.refresh_idaview_anyway() # TODO should this be here?
@@ -133,7 +135,7 @@ class MicroCursorHighlight(object):
 
     def hxe_close_pseudocode(self, vdui):
         """
-        TODO
+        (Event) A Hex-Rays pseudocode window was closed.
         """
         if self._last_vdui == vdui:
             self._last_vdui = None
@@ -143,7 +145,7 @@ class MicroCursorHighlight(object):
 
     def hxe_refresh_pseudocode(self, vdui):
         """
-        TODO
+        (Event) A Hex-Rays pseudocode window was refreshed/changed.
         """
         if self.model.current_function != vdui.cfunc.entry_ea:
             self._sync_microtext(vdui)
@@ -151,7 +153,7 @@ class MicroCursorHighlight(object):
 
     def hxe_curpos(self, vdui):
         """
-        Cursosr position changed in a Hex-Rays window.
+        (Event) The user cursor position changed in a Hex-Rays pseudocode window.
         """
         self._hexrays_origin = False
         self._hexrays_addresses = self._get_active_vdui_addresses(vdui)
@@ -159,7 +161,7 @@ class MicroCursorHighlight(object):
         if self.model.current_function != vdui.cfunc.entry_ea:
             self._sync_microtext(vdui)
 
-        if self.model.ignore_move:
+        if self._ignore_move:
             # TODO put a refresh here ?
             return 0
         self._hexrays_origin = True
@@ -171,7 +173,7 @@ class MicroCursorHighlight(object):
 
     def render_lines(self, lines_out, widget, lines_in):
         """
-        TODO
+        (Event) IDA is about to render code viewer lines.
         """
         widget_type = ida_kernwin.get_widget_type(widget)
         if widget_type == ida_kernwin.BWN_PSEUDOCODE and self._sync_status:
@@ -186,7 +188,7 @@ class MicroCursorHighlight(object):
 
     def _cache_active_vdui(self):
         """
-        TODO
+        Enumerate and cache all the open Hex-Rays pseudocode windows (vdui).
         """
         vdui_map = get_all_vdui()
 
@@ -202,7 +204,7 @@ class MicroCursorHighlight(object):
 
     def _cache_vdui_maps(self, vdui):
         """
-        Return the vdui line_num --> [ea1, ea2, ... ] address map
+        Generate and cache the citem & address line maps for the given vdui.
         """
         item_map = map_line2citem(vdui.cfunc.get_pseudocode())
         self._item_maps[vdui] = item_map
@@ -219,7 +221,7 @@ class MicroCursorHighlight(object):
 
     def _get_vdui_address_map(self, vdui):
         """
-        TODO
+        Return the vdui line_num --> [ea1, ea2, ... ] address map.
         """
         address_map = self._address_maps.get(vdui, None)
         if not address_map:
@@ -229,7 +231,7 @@ class MicroCursorHighlight(object):
     
     def _get_vdui_item_map(self, vdui):
         """
-        TODO
+        Return the vdui line_num --> [citem_id1, citem_id2, ... ] citem map.
         """
         item_map = self._item_maps.get(vdui, None)
         if not item_map:
@@ -243,7 +245,7 @@ class MicroCursorHighlight(object):
 
     def _highlight_lines(self, lines_out, to_paint, lines_in):
         """
-        TODO
+        Highlight the IDA viewer line numbers specified in to_paint.
         """
         assert len(lines_in.sections_lines) == 1, "Simpleviews should only have one section!?"
         color = ida_kernwin.CK_EXTRA1 if self.model.current_cursor.mapped else 0x400000FF
@@ -258,7 +260,7 @@ class MicroCursorHighlight(object):
 
     def _highlight_hexrays(self, lines_out, widget, lines_in):
         """
-        TODO
+        Highlight lines in the given Hex-Rays window according to the synchronized addresses.
         """
         vdui = ida_hexrays.get_widget_vdui(widget)
         if self._hexrays_addresses or self._hexrays_origin:
@@ -266,7 +268,7 @@ class MicroCursorHighlight(object):
 
     def _highlight_microcode(self, lines_out, widget, lines_in):
         """
-        TODO
+        Highlight lines in the given microcode window according to the synchronized addresses.
         """
         if not self.model.mtext.lines:
             return
@@ -314,5 +316,5 @@ class MicroCursorHighlight(object):
         """
         TODO: this probably should just be a func in the controller
         """
-        self.controller.decompile(vdui.cfunc.entry_ea)
+        self.controller.select_function(vdui.cfunc.entry_ea)
         self.controller.view.refresh()

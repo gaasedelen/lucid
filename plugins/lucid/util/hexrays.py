@@ -228,7 +228,7 @@ def map_line2ea(cfunc, line2citem):
                 item = treeitems[index]
                 address = item.ea
 
-                # TODO, ehh, emit these for now (curly braces, basically)
+                # TODO, ehh, omit these for now (curly braces, basically)
                 if item.op == ida_hexrays.cit_block:
                     continue
 

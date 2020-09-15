@@ -110,8 +110,8 @@ class LucidCore(object):
         # it but at the current IDA cursor address
         #
 
-        if self.explorer and self.explorer.visible():
-            self.explorer.decompile(current_address)
+        if self.explorer and self.explorer.view.visible:
+            self.explorer.select_function(current_address)
             return
 
         # no microcode window in use, create a new one and show it
@@ -205,7 +205,7 @@ class LucidCore(object):
         for address in list(idautils.Functions()):
          
             print("0x%08X: DECOMPILING" % address)
-            self.explorer.decompile(address)
+            self.explorer.select_function(address)
             self.explorer.view.refresh()
 
             # change the codeview to a starting maturity levels
@@ -214,7 +214,7 @@ class LucidCore(object):
 
                 # select each line in the current 'starting' maturity context
                 for idx, line in enumerate(self.explorer.model.mtext.lines):
-                    self.explorer.select_pos(idx, 0, 0)
+                    self.explorer.select_position(idx, 0, 0)
 
                     # 
                     maturity_traversal = get_mmat_levels()

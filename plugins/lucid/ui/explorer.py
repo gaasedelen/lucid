@@ -2,6 +2,7 @@ import ctypes
 
 import ida_ida
 import ida_funcs
+import ida_graph
 import ida_idaapi
 import ida_kernwin
 import ida_hexrays
@@ -18,25 +19,77 @@ from lucid.microtext import MicrocodeText, MicroInstructionToken, MicroOperandTo
 # Microcode Explorer
 #------------------------------------------------------------------------------
 #
-#    TODO: This file is pretty messy/hacky and needs to be cleaned up.
-#
 #    The Microcode Explorer UI is mostly implemented following a standard
 #    Model-View-Controller pattern. This is a little abnormal for Qt, but 
 #    I've come to appreciate it more for its portability and testability.
 #
 
 class MicrocodeExplorer(object):
+    """
+    The controller component of the microcode explorer.
+
+    The role of the controller is to handle user gestures, map user actions to
+    model updates, and change views based on controls. In theory, the
+    controller should be able to drive the 'view' headlessly or simulate user
+    UI interaction.
+    """
     
     def __init__(self):
         self.model = MicrocodeExplorerModel()
         self.view = MicrocodeExplorerView(self, self.model)
         self.view._code_sync.enable_sync(True) # XXX/HACK
 
-    def decompile(self, ea):
+    def show(self, address=None):
         """
-        TODO/COMMENT
+        Show the microcode explorer.
         """
-        func = ida_funcs.get_func(ea)
+        if address is None:
+            address = ida_kernwin.get_screen_ea()
+        self.select_function(address)
+        self.view.show()
+
+    def show_subtree(self, insn_token):
+        """
+        Show the sub-instruction graph for the given instruction token.
+        """
+        graph = MicroSubtreeView(insn_token.insn)
+        graph.show()
+
+        # TODO/HACK: this is dumb, but moving it breaks my centering code so
+        # i'll figure it out later...
+        gv = ida_graph.get_graph_viewer(graph.GetWidget())
+        ida_graph.viewer_set_titlebar_height(gv, 15)
+
+    #-------------------------------------------------------------------------
+    # View Toggles
+    #-------------------------------------------------------------------------
+
+    def set_highlight_mutual(self, status):
+        """
+        Toggle the highlighting of lines containing the same active address.
+        """
+        if status:
+            self.view._code_sync.hook()
+        else:
+            self.view._code_sync.unhook()
+        ida_kernwin.refresh_idaview_anyway()
+
+    def set_verbose(self, status):
+        """
+        Toggle the verbosity of the printed microcode text.
+        """
+        self.model.verbose = status
+        ida_kernwin.refresh_idaview_anyway()
+    
+    #-------------------------------------------------------------------------
+    # View Controls
+    #-------------------------------------------------------------------------
+
+    def select_function(self, address):
+        """
+        Switch the microcode view to the specified function.
+        """
+        func = ida_funcs.get_func(address)
         if not func:
             return False
         
@@ -49,55 +102,16 @@ class MicrocodeExplorer(object):
         ida_kernwin.refresh_idaview_anyway()
         return True
 
-    def show(self, address):
-        """
-        TODO/COMMENT
-        """
-        self.decompile(address)
-        self.view.show()
-
-    def visible(self):
-        """
-        TODO/COMMENT
-        """
-        return self.view.visible
-
-    def set_highlight_mutual(self, status):
-        """
-        TODO/COMMENT
-        """
-        if status:
-            self.view._code_sync.hook()
-        else:
-            self.view._code_sync.unhook()
-        ida_kernwin.refresh_idaview_anyway()
-
-    def set_verbose(self, status):
-        """
-        TODO/COMMENT
-        """
-        self.model.verbose = status
-        ida_kernwin.refresh_idaview_anyway()
-
     def select_maturity(self, maturity_name):
         """
-        TODO/COMMENT
+        Switch the microcode view to the specified maturity level.
         """
         self.model.active_maturity = get_mmat(maturity_name)
-        self.view.refresh() # TODO move to the model signals ?
-
-    def select_pos(self, line_num, x, y):
-        """
-        TODO/COMMENT
-        """
-        self.model.current_position = (line_num, x, y)
-        #print(" - hovered token: %s" % self.model.current_token.text)
-        #print(" - hovered taddr: 0x%08X" % self.model.current_token.address)
-        #print(" - hovered laddr: 0x%08X" % self.model.current_address)
+        #self.view.refresh()
 
     def select_address(self, address):
         """
-        Select a token in the view by a given address.
+        Select a token in the microcode view matching the given address.
         """
         tokens = self.model.mtext.get_tokens_for_address(address)
         if not tokens:
@@ -112,11 +126,20 @@ class MicrocodeExplorer(object):
         self.model.current_position = (token_line_num, token_x, rel_y)
         return tokens[0]
 
-    def activate_pos(self, line_num, x, y):
+    def select_position(self, line_num, x, y):
         """
-        TODO/COMMENT
+        Select the given text position in the microcode view.
         """
-        token = self.model.mtext.get_token_at_pos(line_num, x)
+        self.model.current_position = (line_num, x, y)
+        #print(" - hovered token: %s" % self.model.current_token.text)
+        #print(" - hovered taddr: 0x%08X" % self.model.current_token.address)
+        #print(" - hovered laddr: 0x%08X" % self.model.current_address)
+
+    def activate_position(self, line_num, x, y):
+        """
+        Activate (eg. double click) the given text position in the microcode view.
+        """
+        token = self.model.mtext.get_token_at_position(line_num, x)
 
         if isinstance(token, AddressToken):
             ida_kernwin.jumpto(token.target_address, -1, 0)
@@ -130,50 +153,48 @@ class MicrocodeExplorer(object):
             self.view._code_view.Jump(*self.model.current_position) 
             return
 
-    def show_subtree(self, insn_token):
-        """
-        TODO
-        """
-        graph = MicroSubtreeView(insn_token.insn)
-        graph.show()
-        
-        import ida_graph
-        gv = ida_graph.get_graph_viewer(graph.GetWidget())
-        ida_graph.viewer_set_titlebar_height(gv, 15)
-
-#-----------------------------------------------------------------------------
-# Model Class
-#-----------------------------------------------------------------------------
-
-class ViewCursor(object):
-    """
-    TODO
-    """
-    def __init__(self, line_num, x, y, mapped=True):
-        self.line_num = line_num
-        self.x = x
-        self.y = y
-        self.mapped = mapped
-
-    @property 
-    def text_position(self):
-        return (self.line_num, self.x)
-
-    @property
-    def viewport_position(self):
-        return (self.line_num, self.x, self.y)
-
 class MicrocodeExplorerModel(object):
     """
-    TODO
+    The model component of the microcode explorer.
+    
+    The role of the model is to encapsulate application state, respond to
+    state queries, and notify views of changes. Ideally, the model could be
+    serialized / unserialized to save and restore state.
     """
+
     def __init__(self):
+
+        #
+        # 'mtext' is short for MicrocodeText objects (see microtext.py)
+        #
+        # this dictionary will contain a mtext object (the renderable text
+        # mapping of a given hexrays mba_t) for each microcode maturity level
+        # of the current function. 
+        #
+        # at any given time, one mtext will be 'active' in the model, and
+        # therefore visible in the UI/Views 
+        #
+
         self._mtext = {x: None for x in get_mmat_levels()}
-        self._active_maturity = ida_hexrays.MMAT_GENERATED
+
+        # 
+        # there is a 'cursor' (ViewCursor) for each microcode maturity level /
+        # mtext object. cursors don't actually contain the 'position' in the
+        # rendered text (line_num, x), but also information to position the
+        # cursor within the line view (y)
+        #
 
         self._view_cursors = {x: None for x in get_mmat_levels()}
 
-        self.ignore_move = False
+        #
+        # the currently active / selected maturity level of the model. this
+        # determines which mtext is currently visible / active in the
+        # microcode view, and which cursor will be used
+        #
+
+        self._active_maturity = ida_hexrays.MMAT_GENERATED
+
+        # this flag tracks the verbosity toggle state
         self._verbose = False
 
         #----------------------------------------------------------------------
@@ -182,34 +203,16 @@ class MicrocodeExplorerModel(object):
 
         self._mtext_refreshed_callbacks = []
         self._position_changed_callbacks = []
-
-        #self.current_position = (0,0,0) # TODO/CURSORS
-
-    @property
-    def verbose(self):
-        """
-        Return the microcode verbosity status of the viewport.
-        """
-        return self._verbose
-
-    @verbose.setter
-    def verbose(self, value):
-        """
-        Set the verbosity of the microcode displayed by the viewport.
-        """
-        if self._verbose == value:
-            return
-
-        # update the active verbosity setting
-        self._verbose = value
-
-        # verbosity must have changed, so force a mtext refresh
-        self.refresh_mtext()
+        self._maturity_changed_callbacks = []
     
+    #-------------------------------------------------------------------------
+    # Read-Only Properties
+    #-------------------------------------------------------------------------
+
     @property
     def mtext(self):
         """
-        Return the microcode text object for the current maturity level.
+        Return the microcode text mapping for the current maturity level.
         """
         return self._mtext[self._active_maturity]
 
@@ -237,14 +240,25 @@ class MicrocodeExplorerModel(object):
         """
         Return the token at the current viewport cursor position.
         """
-        return self.mtext.get_token_at_pos(*self.current_position[:2])
+        return self.mtext.get_token_at_position(*self.current_position[:2])
     
     @property
     def current_address(self):
         """
         Return the address at the current viewport cursor position.
         """
-        return self.mtext.get_address_at_pos(*self.current_position[:2])
+        return self.mtext.get_address_at_position(*self.current_position[:2])
+
+    @property
+    def current_cursor(self):
+        """
+        Return the current viewport cursor.
+        """
+        return self._view_cursors[self._active_maturity]
+
+    #-------------------------------------------------------------------------
+    # Mutable Properties
+    #-------------------------------------------------------------------------
 
     @property
     def current_position(self):
@@ -253,45 +267,68 @@ class MicrocodeExplorerModel(object):
         """
         return self.current_cursor.viewport_position
 
-    @property
-    def current_cursor(self):
-        """
-        Return the current viewport cursor.
-        """
-        return self._view_cursors[self._active_maturity]
-    
     @current_position.setter
     def current_position(self, value):
         """
         Set the cursor position of the viewport.
         """
-
-        #
-        # since the cursor position is being set very explicitly, we should
-        # wipe existing cursor information for all levels as it will be stale
-        #
-
-        self._view_cursors = {x: None for x in get_mmat_levels()}
-        
-        self._translate_mtext_cursor(value, self.active_maturity)
-
-        # the cursor position has been changed...
+        self._gen_cursors(value, self.active_maturity)
         self._notify_position_changed()
 
     @property
+    def verbose(self):
+        """
+        Return the microcode verbosity status of the viewport.
+        """
+        return self._verbose
+
+    @verbose.setter
+    def verbose(self, value):
+        """
+        Set the verbosity of the microcode displayed by the viewport.
+        """
+        if self._verbose == value:
+            return
+
+        # update the active verbosity setting
+        self._verbose = value
+
+        # verbosity must have changed, so force a mtext refresh
+        self.refresh_mtext()
+    
+    @property
     def active_maturity(self):
+        """
+        Return the active microcode maturity level.
+        """
         return self._active_maturity
     
     @active_maturity.setter
     def active_maturity(self, new_maturity):
+        """
+        Set the active microcode maturity level.
+        """
         self._active_maturity = new_maturity
-        # TODO signal shit changed
-    
+        self._notify_maturity_changed()
+
+    #----------------------------------------------------------------------
+    # Misc
+    #----------------------------------------------------------------------
+
     def update_mtext(self, mtext, maturity):
+        """
+        Set the mtext for a given microcode maturity level.
+        """
         self._mtext[maturity] = mtext
         self._view_cursors[maturity] = ViewCursor(0, 0, 0)
 
     def refresh_mtext(self):
+        """
+        Regenerate the rendered text for all microcode maturity levels.
+
+        TODO: This is a bit sloppy, and is basically only used for the
+        verbosity toggle.
+        """
         for maturity, mtext in self._mtext.items():
             if maturity == self.active_maturity:
                 new_mtext = MicrocodeText(mtext.mba, self.verbose)
@@ -300,6 +337,53 @@ class MicrocodeExplorerModel(object):
                 continue
             mtext.refresh(self.verbose)
         self._notify_mtext_refreshed()
+
+    def _gen_cursors(self, position, mmat_src):
+        """
+        Generate the cursors for all levels from a source position and maturity.
+        """
+        mmat_levels = get_mmat_levels()
+        mmat_first, mmat_final = mmat_levels[0], mmat_levels[-1]
+
+        # clear out all the existing cursor mappings 
+        self._view_cursors = {x: None for x in mmat_levels}
+
+        # save the starting cursor
+        line_num, x, y = position 
+        self._view_cursors[mmat_src] = ViewCursor(line_num, x, y, True)
+
+        # map the cursor backwards from the source maturity
+        mmat_lower = range(mmat_first, mmat_src)[::-1]
+        current_maturity = mmat_src
+        for next_maturity in mmat_lower:
+            self._transfer_cursor(current_maturity, next_maturity)
+            current_maturity = next_maturity
+
+        # map the cursor forward from the source maturity
+        mmat_higher = range(mmat_src+1, mmat_final + 1)
+        current_maturity = mmat_src
+        for next_maturity in mmat_higher:
+            self._transfer_cursor(current_maturity, next_maturity)
+            current_maturity = next_maturity
+
+    def _transfer_cursor(self, mmat_src, mmat_dst):
+        """
+        Translate the cursor position from one maturity to the next.
+        """
+        position = self._view_cursors[mmat_src].viewport_position
+        mapped = self._view_cursors[mmat_src].mapped
+
+        # attempt to translate the position in one mtext to another
+        projection = translate_mtext_position(position, self._mtext[mmat_src], self._mtext[mmat_dst])
+
+        # if translation failed, we will generate an approximate cursor
+        if not projection:
+            mapped = False
+            projection = remap_mtext_position(position, self._mtext[mmat_src], self._mtext[mmat_dst])
+
+        # save the generated cursor
+        line_num, x, y = projection
+        self._view_cursors[mmat_dst] = ViewCursor(line_num, x, y, mapped)
 
     #----------------------------------------------------------------------
     # Callbacks
@@ -328,86 +412,27 @@ class MicrocodeExplorerModel(object):
         Notify listeners of a cursor position changed event.
         """
         notify_callback(self._position_changed_callbacks)
-    
-    #----------------------------------------------------------------------
-    # TODO
-    #----------------------------------------------------------------------
 
-    def _translate_mtext_cursor(self, position, mmat_src):
+    def maturity_changed(self, callback):
         """
-        TODO
+        Subscribe a callback for maturity changed events.
         """
-        mmat_levels = get_mmat_levels()
-        mmat_first, mmat_final = mmat_levels[0], mmat_levels[-1]
+        register_callback(self._maturity_changed_callbacks, callback)
 
-        # translate cursor backwards
-        mmat_lower = range(mmat_first, mmat_src)[::-1]
-        mmat_higher = range(mmat_src+1, mmat_final + 1)
-
-        line_num, x, y = position 
-        self._view_cursors[mmat_src] = ViewCursor(line_num, x, y, True)
-
-        # map backwards
-        current_maturity = mmat_src
-        for next_maturity in mmat_lower:
-            self._transfer_cursor(current_maturity, next_maturity)
-            current_maturity = next_maturity
-
-        # map forward
-        current_maturity = mmat_src
-        for next_maturity in mmat_higher:
-            self._transfer_cursor(current_maturity, next_maturity)
-            current_maturity = next_maturity
-
-    def _transfer_cursor(self, mmat_src, mmat_dst):
+    def _notify_maturity_changed(self):
         """
-        TODO
+        Notify listeners of a maturity changed event.
         """
-        position = self._view_cursors[mmat_src].viewport_position
-        mapped = self._view_cursors[mmat_src].mapped
-
-        # attempt to translate the current position to its equivalent in the destination mtext
-        projection = translate_mtext_position(position, self._mtext[mmat_src], self._mtext[mmat_dst])
-        if not projection:
-            mapped = False
-            projection = remap_mtext_position(position, self._mtext[mmat_src], self._mtext[mmat_dst])
-        line_num, x, y = projection
-        self._view_cursors[mmat_dst] = ViewCursor(line_num, x, y, mapped)
-        return projection
+        notify_callback(self._maturity_changed_callbacks)
 
 #-----------------------------------------------------------------------------
-# View Class
+# UI Components
 #-----------------------------------------------------------------------------
-
-class LayerListWidget(QtWidgets.QListWidget):
-
-    def __init__(self):
-        super(LayerListWidget, self).__init__()
-        self.addItems([get_mmat_name(x) for x in get_mmat_levels()])
-        self.setCurrentRow(0)
-
-        # make the list widget a fixed size, slightly wider than it needs to be
-        width = self.sizeHintForColumn(0)
-        self.setMaximumWidth(int(width + width * 0.10))
-
-    def wheelEvent(self, event):
-        y = event.angleDelta().y()
-
-        # scrolling down, clamp to last row
-        if y < 0:
-            next_row = min(self.currentRow()+1, self.count()-1)
-
-        # scrolling up, clamp to first row (0)
-        elif y > 0:
-            next_row = max(self.currentRow()-1, 0)
-        
-        # horizontal scroll ? nothing to do..
-        else:
-            return
-
-        self.setCurrentRow(next_row)
 
 class MicrocodeExplorerView(QtWidgets.QWidget):
+    """
+    The view component of the Microcode Explorer.
+    """
 
     WINDOW_TITLE = "Microcode Explorer"
 
@@ -523,21 +548,19 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
         """
         Layout the major UI elements of the widget.
         """
-
-        # layout the major elements of our widget
         layout = QtWidgets.QGridLayout()
 
-        # explorer layout                         r  c  rs  cs
-        layout.addWidget(self._code_view.widget,  0, 0,  0,  1)
-        layout.addWidget(self._maturity_list,     0, 1,  1,  1)
-        layout.addWidget(self._groupbox_settings, 1, 1,  1,  1)
+        # arrange the widgets in a 'grid'         row  col  row span  col span
+        layout.addWidget(self._code_view.widget,    0,   0,        0,        1)
+        layout.addWidget(self._maturity_list,       0,   1,        1,        1)
+        layout.addWidget(self._groupbox_settings,   1,   1,        1,        1)
 
-        # apply the layout to the containing form
+        # apply the layout to the widget
         self.widget.setLayout(layout)
         
     def _ui_init_signals(self):
         """
-        TODO
+        Connect UI signals.
         """
         self._maturity_list.currentItemChanged.connect(lambda x, y: self.controller.select_maturity(x.text()))
         self._code_view.connect_signals(self.controller)
@@ -547,8 +570,10 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
         self._checkbox_cursor.stateChanged.connect(lambda x: self.controller.set_highlight_mutual(bool(x)))
         self._checkbox_verbose.stateChanged.connect(lambda x: self.controller.set_verbose(bool(x)))
         self._checkbox_sync.stateChanged.connect(lambda x: self._code_sync.enable_sync(bool(x)))
+
+        # model signals
         self.model.mtext_refreshed(self.refresh)
-        #self._checkbox_cursor.stateChanged.connect(lambda x: controller.set_highlight_mutual(bool(x)))
+        self.model.maturity_changed(self.refresh)
     
     #--------------------------------------------------------------------------
     # Misc
@@ -556,18 +581,58 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
 
     def refresh(self):
         """
-        TODO
+        Refresh the microcode explorer UI based on the model state.
         """
         self._maturity_list.setCurrentRow(self.model.active_maturity - 1)
         self._code_view.refresh()
 
-#-----------------------------------------------------------------------------
-# Rewriting...
-#-----------------------------------------------------------------------------
+class LayerListWidget(QtWidgets.QListWidget):
+    """
+    The microcode maturity list widget
+    """
+
+    def __init__(self):
+        super(LayerListWidget, self).__init__()
+
+        # populate the list widget with the microcode maturity levels
+        self.addItems([get_mmat_name(x) for x in get_mmat_levels()])
+
+        # select the first maturity level, by default
+        self.setCurrentRow(0)
+
+        # make the list widget a fixed size, slightly wider than it needs to be
+        width = self.sizeHintForColumn(0)
+        self.setMaximumWidth(int(width + width * 0.10))
+
+    def wheelEvent(self, event):
+        """
+        Handle mouse wheel scroll events.
+        """
+        y = event.angleDelta().y()
+
+        # scrolling down, clamp to last row
+        if y < 0:
+            next_row = min(self.currentRow()+1, self.count()-1)
+
+        # scrolling up, clamp to first row (0)
+        elif y > 0:
+            next_row = max(self.currentRow()-1, 0)
+        
+        # horizontal scroll ? nothing to do..
+        else:
+            return
+
+        self.setCurrentRow(next_row)
 
 class MicrocodeView(ida_kernwin.simplecustviewer_t):
     """
-    Creates a widget that displays Hex-Rays microcode.
+    An IDA-based text area that will render the Hex-Rays microcode.
+
+    TODO: I'll probably rip this out in the future, as I'll have finer
+    control over the interaction / implementation if I just roll my own
+    microcode text widget.
+
+    For that reason, excuse its hacky-ness / lack of comments.
     """
 
     def __init__(self, model):
@@ -577,8 +642,8 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
 
     def connect_signals(self, controller):
         self.controller = controller
-        self.OnCursorPosChanged = lambda: controller.select_pos(*self.GetPos())
-        self.OnDblClick = lambda _: controller.activate_pos(*self.GetPos())
+        self.OnCursorPosChanged = lambda: controller.select_position(*self.GetPos())
+        self.OnDblClick = lambda _: controller.activate_position(*self.GetPos())
         self.model.position_changed(self.refresh_cursor)
 
     def refresh(self):
@@ -609,12 +674,19 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
         pass
 
     def OnPopup(self, form, popup_handle):
-        """
-        Context menu popup is about to be shown. Create items dynamically if you wish
-
-        @return: Boolean. True if you handled the event
-        """
         controller = self.controller
+
+        #
+        # so, i'm pretty picky about my UI / interactions. IDA puts items in
+        # the right click context menus of custom (code) viewers.
+        #
+        # these items aren't really relevant (imo) to the microcode viewer,
+        # so I do some dirty stuff here to filter them out and ensure only
+        # my items will appear in the context menu.
+        #
+        # there's only one right click context item right now, but in the
+        # future i'm sure there will be more.
+        #
 
         class FilterMenu(QtCore.QObject):
             def __init__(self, qmenu):
@@ -636,7 +708,7 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
         self.filter = FilterMenu(qmenu)
         qmenu.installEventFilter(self.filter)
 
-        # only handle right clicks of instructions
+        # only handle right clicks on lines containing micro instructions
         ins_token = self.model.mtext.get_ins_for_line(self.model.current_line)
         if not ins_token:
             return False
@@ -647,7 +719,30 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
             def update(self, ctx):
                 return ida_kernwin.AST_ENABLE_ALWAYS
 
+        # inject the 'View subtree' action into the right click context menu
         desc = ida_kernwin.action_desc_t(None, 'View subtree', MyHandler())
         ida_kernwin.attach_dynamic_action_to_popup(form, popup_handle, desc, None)
         
         return True
+
+#-----------------------------------------------------------------------------
+# Util
+#-----------------------------------------------------------------------------
+
+class ViewCursor(object):
+    """
+    TODO
+    """
+    def __init__(self, line_num, x, y, mapped=True):
+        self.line_num = line_num
+        self.x = x
+        self.y = y
+        self.mapped = mapped
+
+    @property 
+    def text_position(self):
+        return (self.line_num, self.x)
+
+    @property
+    def viewport_position(self):
+        return (self.line_num, self.x, self.y)

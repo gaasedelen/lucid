@@ -33,7 +33,7 @@ from lucid.util.hexrays import get_mmat_name
 #    to the rendered microcode text.
 #
 
-# TODO: ehh this should probably get refactored out, lmao
+# TODO: ehh this should probably get refactored out
 MAGIC_BLK_INFO = 0x1230
 MAGIC_BLK_EDGE = 0x1231
 MAGIC_BLK_UDNR = 0x1232
@@ -737,8 +737,8 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
     Translate an instruction position from one mtext to another.
     """
     line_num, x, y = position
-    token_src = mtext_src.get_token_at_pos(line_num, x)
-    address_src = mtext_src.get_address_at_pos(line_num, x)
+    token_src = mtext_src.get_token_at_position(line_num, x)
+    address_src = mtext_src.get_address_at_position(line_num, x)
 
     #
     # find all the lines in the destination text that claim to contain the
