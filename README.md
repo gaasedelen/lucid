@@ -72,6 +72,7 @@ You can view these individual trees by right clicking an instruction and selecti
 
 As this is the initial release, there will probably a number of small quirks and bugs. Here are a few known issues at the time of release:
 
+* While sync'd with hexrays, cursor mapping can get wonky if focused on microcode that gets optimized away
 * When opening the Sub-instruction Graph, window/tab focus can change unexpectedly
 * Microcode Explorer does not dock to the top-level far right compartment on Linux?
 * Switching between multiple Pseudocode windows in different functions might cause problems

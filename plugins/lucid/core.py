@@ -20,7 +20,7 @@ from lucid.ui.explorer import MicrocodeExplorer
 class LucidCore(object):
 
     PLUGIN_NAME = "Lucid"
-    PLUGIN_VERSION = "0.1.0"
+    PLUGIN_VERSION = "0.1.1"
     PLUGIN_AUTHORS = "Markus Gaasedelen"
     PLUGIN_DATE = "2020"
 
