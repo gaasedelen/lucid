@@ -20,9 +20,9 @@ from lucid.ui.explorer import MicrocodeExplorer
 class LucidCore(object):
 
     PLUGIN_NAME = "Lucid"
-    PLUGIN_VERSION = "0.1.1"
-    PLUGIN_AUTHORS = "Markus Gaasedelen"
-    PLUGIN_DATE = "2020"
+    PLUGIN_VERSION = "0.2.0"
+    PLUGIN_AUTHORS = "Markus Gaasedelen, Fireboyd78"
+    PLUGIN_DATE = "2024"
 
     def __init__(self, defer_load=False):
         self.loaded = False
@@ -102,7 +102,7 @@ class LucidCore(object):
         """
         current_address = ida_kernwin.get_screen_ea()
         if current_address == ida_idaapi.BADADDR:
-            print("Could not open Microcode Explorer (bad cursor address)")
+            ida_kernwin.warning("Could not open Microcode Explorer (bad cursor address)")
             return
 
         #

@@ -1,4 +1,5 @@
 import collections
+from collections.abc import Iterable
 
 import ida_lines
 import ida_idaapi
@@ -30,12 +31,17 @@ class TextCell(object):
         # public attributes
         self.parent = parent
         self.address = ida_idaapi.BADADDR
+    
+    def get_children(self):
+        """
+        Returns any children of this text cell. Default behavior is to return nothing.
+        """
+        return None
 
     def ancestor_with_address(self):
         """
         Return the first parent of this cell that has a valid address.
         """
-        address = ida_idaapi.BADADDR
         token = self.parent
 
         # iterate upwards through the target token parents until an address is found
@@ -60,6 +66,174 @@ class TextCell(object):
         Return a colored/formatted representation of this text cell.
         """
         return self._tagged_text
+
+
+class TokenAddressIterator:
+    """
+    Custom helper class for iterating over tokens that exist at a specific address.
+    """
+    
+    @staticmethod
+    def is_valid(token):
+        return token and issubclass(type(token), TextCell)
+    
+    def __init__(self, items, address, max_count = 0):
+        addrmap = False
+        
+        if isinstance(items, dict):
+            if addresses := items.get(address, []):
+                items = addresses
+                addrmap = True
+            else:
+                items = items.items()
+        
+        if issubclass(type(items), Iterable):
+            items = list(items)
+        else:
+            raise TypeError(items)
+        
+        self._addrmap = addrmap
+        self._items = items
+        self._address = address
+        
+        assert max_count >= 0, "max_count cannot be a negative number"
+        
+        self._max_count = max_count
+        self._setup_iter()
+    
+    def _setup_iter(self):
+        self._myiter = filter(self.is_valid, self._items)
+        self._subiter = None
+        self._exhausted = False
+        self._remain = self._max_count if self._max_count else 0
+        
+    def __iter__(self):
+        self._setup_iter()
+        return self
+
+    def _get_next_token(self):
+        if self._subiter:
+            # try to return the next sub-token
+            try:
+                return next(self._subiter)
+            except StopIteration as e:
+                # no more sub-tokens are left :(
+                self._subiter = None
+        
+        if not self._myiter:
+            # well, this is strange...I'm sure it'll happen lol
+            raise Exception("iterator undefined?!")
+        
+        # grab the next token
+        return next(self._myiter)
+
+    def __next__(self):
+        addrmap = self._addrmap # items already of the target address?
+        while not self._exhausted:
+            try:
+                token = self._get_next_token()
+                if not token:
+                    # end of subtokens
+                    continue
+                
+                if not addrmap and token.address > self._address:
+                    # too far ahead, stop iterating through our tokens
+                    raise StopIteration
+                
+                if issubclass(type(token), TextToken):
+                    # prepare to check its subtokens next
+                    if items := token.get_token_items():
+                        self._subiter = TokenAddressIterator(items, self._address)
+                
+                if addrmap or token.address == self._address:
+                    # only get up to max_count tokens, if specified
+                    if self._remain:
+                        self._remain -= 1
+                        if not self._remain:
+                            self._exhausted = True
+                    # we found a match!
+                    return token
+            except StopIteration as e:
+                # we're all out of tokens now :(
+                self._exhausted = True
+        if self._exhausted:
+            raise StopIteration
+
+
+class TokenRange:
+    """
+    Custom helper class for managing token ranges.
+    """
+    
+    def __init__(self, token, start, end):
+        self._token = token
+        self._issubclass = issubclass(type(token), TextToken)
+        self._start = start
+        self._end = end
+    
+    def __contains__(self, index):
+        return index >= self._start and index < self._end
+    
+    def empty(self):
+        return not self._token
+    
+    def get_index(self, token):
+        """
+        Returns the index of the specified token, if it exists; otherwise, None
+        """
+        
+        if self._token == token:
+            return self._start
+        if self._issubclass:
+            if index := self._token.get_index_of_token(token) is not None:
+                return self._start + index
+        return None
+    
+    def get_token(self, x_index):
+        """
+        Returns the token at the specified index, if it exists; otherwise, None
+        """
+        
+        if self.empty() or x_index not in self:
+            return None
+
+        token = self._token
+        
+        #
+        # if the matching child token does not derive from a TextToken, it is
+        # probably a TextCell which cannot nest other tokens. so we can simply
+        # return the found token as it is a leaf
+        #
+
+        if not self._issubclass:
+            return token
+
+        #
+        # the matching token must derive from a TextToken or something
+        # capable of nesting tokens, so recurse downwards through the text
+        # structure to see if there is a deeper, more precise token that
+        # can be returned
+        #
+
+        return token.get_token_at_index(x_index - self._start)
+    
+    
+    @property
+    def token(self):
+        return self._token
+    
+    @property
+    def start(self):
+        return self._start
+    
+    @property
+    def end(self):
+        return self._end
+    
+    @property
+    def length(self):
+        return self._end - self._start
+
 
 class TextToken(TextCell):
     """
@@ -88,31 +262,47 @@ class TextToken(TextCell):
         token_ranges = []
         parsing_offset = 0
 
+        debug_lines = [f"**** {len(self.items)} tokens"]
         for token in self.items:
-            token_index = self.text[parsing_offset:].index(token.text)
-            token_start = parsing_offset + token_index
+            debug_lines.append(f"** find token '{token.text}' in '{self.text}'\n\tat {parsing_offset}: '{self.text[parsing_offset:]}'")
+            
+            token_start = self.text.index(token.text, parsing_offset)
             token_end = token_start + len(token.text)
-            token_ranges.append((range(token_start, token_end), token))
+            
+            debug_lines.append(f"** - start={token_start}, end={token_end} => '{self.text[token_start:token_end]}'")
+            
+            token_range = TokenRange(token, token_start, token_end)
+            token_ranges.append(token_range)
+            
+            if token_start > 2 and self.text.find(',', parsing_offset, token_start) > parsing_offset:
+                debug_lines.append("**** skipped setting the parsing offset!")
+                continue
+            
             parsing_offset = token_end
+        
+        #print('\n'.join(debug_lines))
 
         self._token_ranges = token_ranges
     
     #-------------------------------------------------------------------------
     # Textual APIs
     #-------------------------------------------------------------------------
-
-    def get_tokens_for_address(self, address):
+    
+    def get_token_items(self):
+        return self.items
+    
+    def get_tokens_for_address(self, address, max_count = 0):
         """
         Return all (child) tokens matching the given address.
         """
-        found = [self] if self.address == address else []
-        for token in self.items:
-            if not issubclass(type(token), TextToken):
-                if token.address == address:
-                    found.append(token)
-                continue
-            found.extend(token.get_tokens_for_address(address))
-        return found
+        it = TokenAddressIterator(self.get_token_items(), address, max_count=max_count)
+        return list(it)
+    
+    def get_first_token_for_address(self, address):
+        """
+        Return first (child) token matching the given address.
+        """
+        return next(iter(self.get_tokens_for_address(address, 1) + [None]))
 
     def get_index_of_token(self, target_token):
         """
@@ -121,14 +311,9 @@ class TextToken(TextCell):
         if target_token == self:
             return 0
 
-        for token_range, token in self._token_ranges:
-            if token == target_token:
-                return token_range[0]
-            if not issubclass(type(token), TextToken):
-                continue
-            found = token.get_index_of_token(target_token)
-            if found is not None:
-                return found + token_range[0]
+        for token_range in self._token_ranges:
+            if (index := token_range.get_index(target_token)) is not None:
+                return index
 
         return None
 
@@ -143,40 +328,13 @@ class TextToken(TextCell):
         # if the given index falls within any of them
         #
 
-        for token_range, token in self._token_ranges:
-            
-            # skip 'blank' children
-            if not token.text:
-                continue 
+        for token_range in self._token_ranges:
+            if (token := token_range.get_token(x_index)) is not None:
+                #print(f"**** token '{token.text}' found at {x_index} in '{self.text}'")
+                return token
 
-            if x_index in token_range:
-                break
-
-        #
-        # if the given index does not fall within a child token range, the
-        # given index must fall on text that makes up this token itself
-        #
-
-        else:
-            return self
-
-        #
-        # if the matching child token does not derive from a TextToken, it is
-        # probably a TextCell which cannot nest other tokens. so we can simply
-        # return the found token as it is a leaf
-        #
-
-        if not issubclass(type(token), TextToken):
-            return token
-
-         #
-         # the matching token must derive from a TextToken or something
-         # capable of nesting tokens, so recurse downwards through the text
-         # structure to see if there is a deeper, more precise token that
-         # can be returned
-         #
-
-        return token.get_token_at_index(x_index - token_range[0])
+        #print(f"**** token not found at {x_index} in '{self.text}'")
+        return self
 
     def get_address_at_index(self, x_index):
         """
@@ -267,27 +425,22 @@ class TextBlock(TextCell):
         """
         Generate a map of token --> address.
         """
-        to_visit = []
-        for line_idx, line in enumerate(self.lines):
-            to_visit.append((line_idx, line))
-
-        line_map = collections.defaultdict(list)
+        
         addr_map = collections.defaultdict(list)
-
-        while to_visit:
-            line_idx, token = to_visit.pop(0)
-            line_map[line_idx].append(token)
+        
+        def _iter_token(token):
+            yield token
             for subtoken in token.items:
-                line_map[line_idx].append(subtoken)
-                if not issubclass(type(subtoken), TextToken):
-                    continue
-                to_visit.append((line_idx, subtoken))
-                if subtoken.address == ida_idaapi.BADADDR:
-                    continue
-                addr_map[subtoken.address].append(subtoken)
-
+                yield subtoken
+                if issubclass(type(subtoken), TextToken):
+                    if subtoken.address != ida_idaapi.BADADDR:
+                        addr_map[subtoken.address].append(subtoken)
+                    yield from _iter_token(subtoken)
+        
         self._ea2token = addr_map
-        self._line2token = line_map
+        self._line2token = {
+            line_idx:list(_iter_token(token)) for line_idx, token in enumerate(self.lines)
+        }
     
     #-------------------------------------------------------------------------
     # Properties
@@ -305,21 +458,30 @@ class TextBlock(TextCell):
     # Textual APIs
     #-------------------------------------------------------------------------
 
+    def get_line_token(self, line_num):
+        """
+        Return the token at the given line number.
+        """
+        if not (0 <= line_num < len(self.lines)):
+            return None
+        return self.lines[line_num]
+
     def get_token_at_position(self, line_num, x_index):
         """
         Return the token at the given text position.
         """
-        if not(0 <= line_num < len(self.lines)):
-            return None
-        return self.lines[line_num].get_token_at_index(x_index)
+        if line := self.get_line_token(line_num):
+            return line.get_token_at_index(x_index)
+        return None
 
     def get_address_at_position(self, line_num, x_index):
         """
         Return the mapped address of the given text position.
         """
-        if not(0 <= line_num < len(self.lines)):
-            return ida_idaapi.BADADDR
-        return self.lines[line_num].get_address_at_index(x_index)
+        if line := self.get_line_token(line_num):
+            return line.get_address_at_index(x_index)
+        # TODO: explain why ?
+        return ida_idaapi.BADADDR
 
     def get_pos_of_token(self, target_token):
         """
@@ -328,30 +490,44 @@ class TextBlock(TextCell):
         for line_num, tokens in self._line2token.items():
             if target_token in tokens:
                 return (line_num, self.lines[line_num].get_index_of_token(target_token))
+        raise Exception(f"**** target_token '{target_token.text}' NOT found!!!")
         return None
 
-    def get_tokens_for_address(self, address):
+    def get_tokens_for_address(self, address, max_count = 0):
         """
-        Return the list of tokens matching the given address.
+        Return all (child) tokens matching the given address.
         """
-        return self._ea2token.get(address, [])
+        it = TokenAddressIterator(self._ea2token, address, max_count=max_count)
+        return list(it)
+    
+    def get_first_token_for_address(self, address):
+        """
+        Return first (child) token matching the given address.
+        """
+        return next(iter(self.get_tokens_for_address(address, 1) + [None]))
+
+    def line_nums_contain_address(self, address):
+        """
+        Returns whether the address exists within any of the line numbers.
+        """
+        for _,tokens in self._line2token.items():
+            for token in tokens:
+                if token.address == address:
+                    return True
+        return False
 
     def get_line_nums_for_address(self, address):
         """
         Return a list of line numbers which contain tokens matching the given address.
         """
         line_nums = set()
-        for line_idx, tokens in self._line2token.items():
-            for token in tokens:
-                if token.address == address:
-                    line_nums.add(line_idx)
-        return list(line_nums)
+        if items := self._line2token.items():
+            line_nums = {line for line,tokens in items \
+                for _ in filter(lambda t: t.address == address, tokens)}
+        return line_nums
 
     def get_addresses_for_line_num(self, line_num):
         """
         Return a list of addresses contained by tokens on the given line number.
         """
-        addresses = set()
-        for token in self._line2token.get(line_num, []):
-            addresses.add(token.address)
-        return list(addresses)
+        return set(token.address for token in self._line2token.get(line_num, []))

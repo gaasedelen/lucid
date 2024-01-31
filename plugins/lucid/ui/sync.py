@@ -55,7 +55,7 @@ class MicroCursorHighlight(object):
         self._hxe_hooks.refresh_pseudocode = self.hxe_refresh_pseudocode
         self._hxe_hooks.close_pseudocode = self.hxe_close_pseudocode
         self._ui_hooks.get_lines_rendering_info = self.render_lines
-        self.model.position_changed(self.refresh_hexrays_cursor)
+        self.model.position_changed += self.refresh_hexrays_cursor
 
     def hook(self):
         self._ui_hooks.hook()
@@ -64,8 +64,9 @@ class MicroCursorHighlight(object):
         self._ui_hooks.unhook()
         self.enable_sync(False)
 
-    def track_view(self, widget):
-        self._code_widget = widget # TODO / temp
+    def track_view(self, view):
+        self._code_view = view
+        self._code_widget = view.widget
 
     def enable_sync(self, status):
 
@@ -149,6 +150,9 @@ class MicroCursorHighlight(object):
         """
         if self.model.current_function != vdui.cfunc.entry_ea:
             self._sync_microtext(vdui)
+        else:
+            # TODO: remove need for force_all (have them queue up for loading as needed)
+            self.controller.view.reinit(force_all=True)
         return 0
 
     def hxe_curpos(self, vdui):
@@ -289,7 +293,7 @@ class MicroCursorHighlight(object):
 
             # special case, only highlight the currently selected microcode line (a special line / block header)
             if self.model.current_line.type:
-                to_paint.add(self.model.current_position[0])
+                to_paint.add(self.model.current_line)
                 target_addresses = []
 
             # 'default' case, target all lines containing the address under the cursor
