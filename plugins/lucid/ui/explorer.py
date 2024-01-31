@@ -111,19 +111,17 @@ class MicrocodeExplorer(object):
             return False
         
         for maturity in get_mmat_levels():
-            mtext = MicrocodeText.create(func, maturity)
-            self.model.update_mtext(mtext, maturity)
+            self.model.init_function(func, maturity)
 
         self.view.refresh()
         ida_kernwin.refresh_idaview_anyway()
         return True
 
-    def select_maturity(self, maturity_name):
+    def select_maturity(self, maturity):
         """
         Switch the microcode view to the specified maturity level.
         """
-        self.model.active_maturity = get_mmat(maturity_name)
-        #self.view.refresh()
+        self.model.active_maturity = maturity
 
     def select_address(self, address):
         """
@@ -177,6 +175,14 @@ class MicrocodeExplorer(object):
             blk_line_num, _ = self.model.mtext.get_pos_of_token(blk_token.lines[0])
             
             self.select_position(blk_line_num, 0, y)
+    
+    def regenerate_microtext(self):
+        self.model.queue_rebuild(active_only=False)
+        self.view.refresh()
+    
+    def synchronize_microtext(self, vdui: ida_hexrays.vdui_t):
+        address = vdui.cfunc.entry_ea
+        self.select_function(address)
 
 class MicrocodeExplorerModel(object):
     """
@@ -218,13 +224,15 @@ class MicrocodeExplorerModel(object):
         #
 
         self._active_maturity = ida_hexrays.MMAT_GENERATED
+        
+        self._rebuild_queue = {x: False for x in get_mmat_levels()}
+        self._refresh_queue = {x: False for x in get_mmat_levels()}
 
         #----------------------------------------------------------------------
         # Callbacks
         #----------------------------------------------------------------------
         
         self.mtext_changed = CallbackHandler(self, name="mtext changed")
-        self.mtext_refreshed = CallbackHandler(self, name="mtext refreshed")
         self.position_changed = CallbackHandler(self, name="position changed")
         self.maturity_changed = CallbackHandler(self, name="maturity changed")
     
@@ -245,9 +253,8 @@ class MicrocodeExplorerModel(object):
         """
         Set the microcode text mapping for the current maturity level.
         """
-        old_mtext = self.mtext
         self._mtext[self._active_maturity] = mtext
-        self.mtext_changed(old_mtext, mtext)
+        self.mtext_changed()
 
     @property
     def current_line(self):
@@ -320,6 +327,10 @@ class MicrocodeExplorerModel(object):
         """
         Set the active microcode maturity level.
         """
+        old_maturity = self._active_maturity
+        if new_maturity == old_maturity:
+            return
+        
         self._active_maturity = new_maturity
         self.maturity_changed()
 
@@ -327,38 +338,84 @@ class MicrocodeExplorerModel(object):
     # Misc
     #----------------------------------------------------------------------
     
+    def queue_rebuild(self, active_only = False):
+        if not active_only:
+            # queue all maturities for a full rebuild
+            # they will only be rebuilt once active
+            for maturity in get_mmat_levels():
+                self._rebuild_queue[maturity] = True
+        else:
+            # force the active maturity to be rebuilt
+            self._rebuild_queue[self.active_maturity] = True
+    
+    def queue_refresh(self, active_only = False):
+        if not active_only:
+            # queue all maturities for a full rebuild
+            # they will only be rebuilt once active
+            for maturity in get_mmat_levels():
+                self._refresh_queue[maturity] = True
+        else:
+            # force the active maturity to be rebuilt
+            self._refresh_queue[self.active_maturity] = True
+    
+    def init_function(self, func, maturity):
+        mtext = MicrocodeText.create(func, maturity)
+        self.update_mtext(mtext, maturity)
+    
     def update_mtext(self, mtext, maturity):
         """
         Set the mtext for a given microcode maturity level.
         """
         self._mtext[maturity] = mtext
+        self._rebuild_queue[maturity] = True # needs to be generated
         self._view_cursors[maturity] = ViewCursor(0, 0, 0)
     
-    def refresh_mtext(self, reinit = False, force_all = False):
+    def redraw_mtext(self, maturity):
         """
-        Regenerate the rendered text for all microcode maturity levels.
+        Redraws the rendered text for the microcode maturity level.
         """
-        old_mtext = None
-        new_mtext = None
+        if maturity != self.active_maturity:
+            return False # XXX: Performance optimization.
         
-        # XXX: this is also a bit hacky, unfortunately
-        for maturity, mtext in self._mtext.items():
-            if maturity == self.active_maturity or force_all:
-                if not reinit:
-                    old_mtext = mtext
-                else:
-                    # fully rebuild it
-                    mtext.reinit()
-            else:
-                # refresh it since it's out of view
-                mtext.refresh()
+        self._mtext[maturity].refresh()
+        self._refresh_queue[maturity] = False
         
-        if old_mtext:
-            # make a new copy of it
-            self.mtext = new_mtext = old_mtext.copy()
+        return True
+    
+    def rebuild_mtext(self, maturity):
+        """
+        Regenerate the rendered text for the microcode maturity level.
+        """
+        if maturity != self.active_maturity:
+            return False # XXX: Performance optimization.
+        
+        if maturity in self._rebuild_queue:
+            # fully rebuild our active maturity
+            self.mtext.reinit()
+            self._rebuild_queue[maturity] = False
+            self._refresh_queue[maturity] = False # no need to redraw since it was rebuilt
+        else:
+            # make a new copy of it and translate the active cursor
+            # this will ensure a proper refresh of the microcode
+            old_mtext = self.mtext
+            new_mtext = old_mtext.copy()
+            self.update_mtext(new_mtext, maturity)
             self.current_position = translate_mtext_position(self.current_position, old_mtext, new_mtext)
         
-        self.mtext_refreshed()
+        return True
+    
+    def refresh_mtext(self):
+        """
+        Updates the rendered text for the microcode as needed.
+        """
+        for maturity, needs_rebuild in self._rebuild_queue.items():
+            if not needs_rebuild:
+                continue
+            self.rebuild_mtext(maturity)
+        for maturity, needs_redraw in self._refresh_queue.items():
+            if not needs_redraw:
+                continue
+            self.redraw_mtext(maturity)
 
     def _gen_cursors(self, position, mmat_src):
         """
@@ -390,6 +447,10 @@ class MicrocodeExplorerModel(object):
         """
         Translate the cursor position from one maturity to the next.
         """
+        
+        if mmat_src in self._rebuild_queue or mmat_dst in self._rebuild_queue:
+            return
+        
         position = self._view_cursors[mmat_src].viewport_position
         mapped = self._view_cursors[mmat_src].mapped
 
@@ -438,8 +499,8 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         Implementation of OptionListener.notify_change for when a microcode option has been updated.
         """
         #print(f"**** notify_change {option_name} = {option_value} (IN OPTIONS={bool(option_name in MicrocodeOptions)})")
-        self.model.refresh_mtext()
-        ida_kernwin.refresh_idaview_anyway()
+        self.model.queue_refresh()
+        self.refresh()
 
     #--------------------------------------------------------------------------
     # Pseudo Widget Functions
@@ -572,7 +633,13 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         """
         Connect UI signals.
         """
-        self._maturity_list.currentItemChanged.connect(lambda x, y: self.controller.select_maturity(x.text()))
+        
+        def _maturity_changed(item):
+            maturity = self._maturity_list.row(item) + 1
+            self.controller.select_maturity(maturity)
+        
+        
+        self._maturity_list.currentItemChanged.connect(_maturity_changed)
         self._code_view.connect_signals(self.controller)
         self._code_view.OnClose = self.hide # HACK
         
@@ -585,30 +652,27 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         self._checkbox_devmode.stateChanged.connect(lambda x: self.controller.set_option('developer_mode', bool(x)))
 
         # model signals
-        self.model.mtext_refreshed += self.refresh
+        self.model.mtext_changed += self.reinit
         self.model.maturity_changed += self.refresh
         
-        # XXX: bit of a hack placing it here... a lot of stuff needs to be rewritten :/
-        self.model.maturity_changed += self.controller.update_subtree
-    
     #--------------------------------------------------------------------------
     # Misc
     #--------------------------------------------------------------------------
 
-    def reinit(self, force_all = False):
+    def reinit(self):
         """
         Fully reinitializes the microcode explorer UI based on the model state.
-        May optionally force all of the maturity levels to update.
         """
-        self.model.refresh_mtext(reinit = True, force_all=force_all)
+        self.model.queue_rebuild(active_only=True)
         self.refresh()
     
     def refresh(self):
         """
         Refresh the microcode explorer UI based on the model state.
         """
-        self._maturity_list.setCurrentRow(self.model.active_maturity - 1)
+        self.model.refresh_mtext()
         self._code_view.refresh()
+        self.controller.update_subtree()
 
 class LayerListWidget(QtWidgets.QListWidget):
     """
@@ -680,7 +744,7 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
         self.refresh_cursor()
 
     def refresh_cursor(self):
-        if not self.model.current_position:
+        if not self.model.current_cursor or not self.model.current_position:
             return
         self.Jump(*self.model.current_position)
 

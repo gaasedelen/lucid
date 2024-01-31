@@ -68,6 +68,12 @@ class MicroCursorHighlight(object):
         self._code_view = view
         self._code_widget = view.widget
 
+    def sync_if_needed(self, vdui, may_regenerate=False):
+        if self.model.current_function != vdui.cfunc.entry_ea:
+            self.controller.synchronize_microtext(vdui)
+        elif may_regenerate:
+            self.controller.regenerate_microtext()
+    
     def enable_sync(self, status):
 
         # nothing to do
@@ -81,8 +87,8 @@ class MicroCursorHighlight(object):
         if status:
             self._hxe_hooks.hook()
             self._cache_active_vdui()
-            if self._last_vdui and (self.model.current_function != self._last_vdui.cfunc.entry_ea):
-                self._sync_microtext(self._last_vdui)
+            if self._last_vdui:
+                self.sync_if_needed(self._last_vdui, may_regenerate=False)
 
         # syncing disabled
         else:
@@ -148,11 +154,7 @@ class MicroCursorHighlight(object):
         """
         (Event) A Hex-Rays pseudocode window was refreshed/changed.
         """
-        if self.model.current_function != vdui.cfunc.entry_ea:
-            self._sync_microtext(vdui)
-        else:
-            # TODO: remove need for force_all (have them queue up for loading as needed)
-            self.controller.view.reinit(force_all=True)
+        self.sync_if_needed(vdui, may_regenerate=True)
         return 0
 
     def hxe_curpos(self, vdui):
@@ -162,17 +164,15 @@ class MicroCursorHighlight(object):
         self._hexrays_origin = False
         self._hexrays_addresses = self._get_active_vdui_addresses(vdui)
 
-        if self.model.current_function != vdui.cfunc.entry_ea:
-            self._sync_microtext(vdui)
+        self.sync_if_needed(vdui, may_regenerate=False)
 
-        if self._ignore_move:
-            # TODO put a refresh here ?
-            return 0
-        self._hexrays_origin = True
-        if not self._hexrays_addresses:
+        self._hexrays_origin = True if not self._ignore_move and self._hexrays_addresses else False
+        
+        if self._hexrays_origin:
+            self.controller.select_address(self._hexrays_addresses[0])
+        elif not self._ignore_move:
             ida_kernwin.refresh_idaview_anyway()
-            return 0
-        self.controller.select_address(self._hexrays_addresses[0])
+        
         return 0
 
     def render_lines(self, lines_out, widget, lines_in):
@@ -266,6 +266,9 @@ class MicroCursorHighlight(object):
         """
         Highlight lines in the given Hex-Rays window according to the synchronized addresses.
         """
+        if not self.model.current_cursor:
+            return
+        
         vdui = ida_hexrays.get_widget_vdui(widget)
         if self._hexrays_addresses or self._hexrays_origin:
             self._highlight_lines(lines_out, set([vdui.cpos.lnnum]), lines_in)
@@ -274,7 +277,7 @@ class MicroCursorHighlight(object):
         """
         Highlight lines in the given microcode window according to the synchronized addresses.
         """
-        if not self.model.mtext.lines:
+        if not self.model.mtext.lines or not self.model.current_cursor:
             return
         
         to_paint = set()
@@ -315,10 +318,3 @@ class MicroCursorHighlight(object):
                 to_paint.add(line_num)
 
         self._highlight_lines(lines_out, to_paint, lines_in)
-
-    def _sync_microtext(self, vdui):
-        """
-        TODO: this probably should just be a func in the controller
-        """
-        self.controller.select_function(vdui.cfunc.entry_ea)
-        self.controller.view.refresh()

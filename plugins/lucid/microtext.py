@@ -530,33 +530,39 @@ class MicrocodeText(TextBlock):
     def __init__(self, maturity):
         super(MicrocodeText, self).__init__()
         self.maturity = maturity
+        self.premade = False
     
     @classmethod
     def create(cls, func, maturity):
         """
-        Create a new instance of the class and generate the microcode text.
+        Create a new instance of the class. Does not generate any of its contents.
         """
         mtext = MicrocodeText(maturity)
         mtext.func = func
-        mtext.reinit()
+        mtext.mba = get_microcode(func, maturity)
+        mtext.premade = True
         return mtext
     
     def copy(self):
         """
-        Create a copy of the microcode and generate its text.
+        Create a copy of the microcode. Does not generate any of its contents.
         """
         mtext = MicrocodeText(self.maturity)
         mtext.func = self.func
         mtext.mba = self.mba
-        mtext.refresh()
+        mtext.premade = True
         return mtext
     
     def reinit(self):
         """
         Reinitialize the underlying microcode and regenerate text.
         """
-        self.func = ida_funcs.get_func(self.func.start_ea)
-        self.mba = get_microcode(self.func, self.maturity)
+        if not self.premade:
+            # get the most up-to-date microcode
+            self.func = ida_funcs.get_func(self.func.start_ea)
+            self.mba = get_microcode(self.func, self.maturity)
+        else: # do a one-time skip if we were just created/copied
+            self.premade = False
         self.refresh()
 
     def refresh(self, maturity=None):
@@ -572,6 +578,9 @@ class MicrocodeText(TextBlock):
         Populate this object from a mba_t.
         """
         blks = []
+        
+        if not self.mba:
+            raise Exception("The requested microcode block is invalid.")
         
         for blk_idx in range(self.mba.qty):
             blk = self.mba.get_mblock(blk_idx)

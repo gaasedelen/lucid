@@ -15,7 +15,7 @@ def get_microcode(func, maturity):
     hf = ida_hexrays.hexrays_failure_t()
     ml = ida_hexrays.mlist_t()
     ida_hexrays.mark_cfunc_dirty(func.start_ea)
-    mba = ida_hexrays.gen_microcode(mbr, hf, ml, ida_hexrays.DECOMP_NO_WAIT, maturity)
+    mba = ida_hexrays.gen_microcode(mbr, hf, ml, ida_hexrays.DECOMP_NO_WAIT | ida_hexrays.DECOMP_ALL_BLKS, maturity)
     if not mba:
         print("0x%08X: %s" % (hf.errea, hf.desc()))
         return None
