@@ -531,6 +531,7 @@ class MicrocodeText(TextBlock):
         super(MicrocodeText, self).__init__()
         self.maturity = maturity
         self.premade = False
+        self.generation = 0
     
     @classmethod
     def create(cls, func, maturity):
@@ -553,6 +554,9 @@ class MicrocodeText(TextBlock):
         mtext.premade = True
         return mtext
     
+    def is_pending(self):
+        return self.generation == 0
+    
     def reinit(self):
         """
         Reinitialize the underlying microcode and regenerate text.
@@ -572,6 +576,7 @@ class MicrocodeText(TextBlock):
         self._generate_from_mba()
         self._generate_lines()
         self._generate_token_address_map()
+        self.generation += 1
 
     def _generate_from_mba(self):
         """

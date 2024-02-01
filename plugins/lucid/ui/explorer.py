@@ -305,6 +305,9 @@ class MicrocodeExplorerModel(object):
         """
         Return the current viewport cursor position (line_num, view_x, view_y).
         """
+        if not self.current_cursor:
+            return (0, 0, 0) # lol
+        
         return self.current_cursor.viewport_position
 
     @current_position.setter
@@ -332,7 +335,7 @@ class MicrocodeExplorerModel(object):
             return
         
         self._active_maturity = new_maturity
-        self.maturity_changed()
+        self.maturity_changed(old_maturity)
 
     #----------------------------------------------------------------------
     # Misc
@@ -404,7 +407,7 @@ class MicrocodeExplorerModel(object):
         
         return True
     
-    def refresh_mtext(self):
+    def refresh_mtext(self, old_maturity = None):
         """
         Updates the rendered text for the microcode as needed.
         """
@@ -416,26 +419,46 @@ class MicrocodeExplorerModel(object):
             if not needs_redraw:
                 continue
             self.redraw_mtext(maturity)
-
+        
+        if old_maturity is None:
+            # we don't need to move the cursor since no other maturities are loaded
+            return
+        
+        # transition from this maturity to the next one
+        self._transfer_cursor(old_maturity, self.active_maturity)    
+        
     def _gen_cursors(self, position, mmat_src):
         """
         Generate the cursors for all levels from a source position and maturity.
         """
-        mmat_levels = get_mmat_levels()
-        mmat_first, mmat_final = mmat_levels[0], mmat_levels[-1]
-
-        # clear out all the existing cursor mappings 
-        self._view_cursors = {x: None for x in mmat_levels}
-
+        mmat_levels = []
+        
+        for maturity, mtext in self._mtext.items():
+            if not mtext or mtext.is_pending():
+                continue
+            mmat_levels.append(maturity)
+        
+        if not mmat_levels:
+            return
+        
+        mmat_first = mmat_levels[0]
+        mmat_final = mmat_levels[-1]
+        
+        #print(f"**** MATURITY: first={mmat_first}, final={mmat_final}")
+        #print(f" - levels: [{','.join([str(n) for n in mmat_levels])}]")
+        
         # save the starting cursor
-        line_num, x, y = position 
+        line_num, x, y = position
+        
+        # clear out all the existing cursor mappings 
+        self._view_cursors = {x: None for x in get_mmat_levels()}        
         self._view_cursors[mmat_src] = ViewCursor(line_num, x, y, True)
-
+        
         # map the cursor backwards from the source maturity
-        mmat_lower = range(mmat_first, mmat_src)[::-1]
+        mmat_lower = [mmat for mmat in range(mmat_first, mmat_src) if mmat in mmat_levels][::-1]
         
         # map the cursor forward from the source maturity
-        mmat_higher = range(mmat_src+1, mmat_final + 1)
+        mmat_higher = [mmat for mmat in range(mmat_src+1, mmat_final+1) if mmat in mmat_levels]
         
         for mmat_range in (mmat_lower, mmat_higher):
             current_maturity = mmat_src
@@ -447,8 +470,7 @@ class MicrocodeExplorerModel(object):
         """
         Translate the cursor position from one maturity to the next.
         """
-        
-        if mmat_src in self._rebuild_queue or mmat_dst in self._rebuild_queue:
+        if self._mtext[mmat_src].is_pending() or self._mtext[mmat_dst].is_pending():
             return
         
         position = self._view_cursors[mmat_src].viewport_position
@@ -666,11 +688,11 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         self.model.queue_rebuild(active_only=True)
         self.refresh()
     
-    def refresh(self):
+    def refresh(self, old_maturity = None):
         """
         Refresh the microcode explorer UI based on the model state.
         """
-        self.model.refresh_mtext()
+        self.model.refresh_mtext(old_maturity=old_maturity)
         self._code_view.refresh()
         self.controller.update_subtree()
 
