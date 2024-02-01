@@ -20,7 +20,7 @@ from lucid.ui.explorer import MicrocodeExplorer
 class LucidCore(object):
 
     PLUGIN_NAME = "Lucid"
-    PLUGIN_VERSION = "0.2.0"
+    PLUGIN_VERSION = "0.2.3"
     PLUGIN_AUTHORS = "Markus Gaasedelen, Fireboyd78"
     PLUGIN_DATE = "2024"
 
@@ -40,7 +40,7 @@ class LucidCore(object):
 
         self._startup_hooks = UIHooks()
         self._startup_hooks.ready_to_run = self.load
-
+        
         if defer_load:
             self._startup_hooks.hook()
             return
@@ -71,7 +71,30 @@ class LucidCore(object):
 
         # all done, mark the core as loaded
         self.loaded = True
-
+    
+    def get_hotload_state(self):
+        """
+        Gets persistent parameters that can be used to restore after a hotload.
+        """
+        state = {}
+        # TODO: Let the classes handle their state data.
+        if self.explorer:
+            explorer_params = {
+                "active": self.explorer.view.visible,
+            }
+            state["explorer"] = explorer_params
+        return state
+    
+    def set_hotload_state(self, state):
+        """
+        Restores saved parameters that were retrieved prior to a hotload.
+        """
+        explorer_params = state.get("explorer", {})
+        # TODO: Let the classes handle their state data.
+        if explorer_params:
+            if explorer_params.get("active", False):
+                self.interactive_view_microcode()
+    
     def unload(self, from_ida=False):
         """
         Unload the plugin core.
@@ -85,6 +108,10 @@ class LucidCore(object):
             return
 
         print("Unloading %s..." % self.PLUGIN_NAME)
+        
+        if self.explorer:
+            self.explorer.unload()
+            del self.explorer
 
         # mark the core as 'unloaded' and teardown its components
         self.loaded = False

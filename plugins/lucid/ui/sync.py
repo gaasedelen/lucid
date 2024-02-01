@@ -57,6 +57,10 @@ class MicroCursorHighlight(object):
         self._ui_hooks.get_lines_rendering_info = self.render_lines
         self.model.position_changed += self.refresh_hexrays_cursor
 
+    def unload(self):
+        self._ui_hooks.unhook()
+        self._hxe_hooks.unhook()
+
     def hook(self):
         self._ui_hooks.hook()
 

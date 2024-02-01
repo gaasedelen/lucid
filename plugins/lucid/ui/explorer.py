@@ -40,7 +40,15 @@ class MicrocodeExplorer(object):
         self.model = MicrocodeExplorerModel()
         self.view = MicrocodeExplorerView(self, self.model)
         self.view._code_sync.enable_sync(True) # XXX/HACK
-
+    
+    def unload(self):
+        if self.graph:
+            self.graph.Close()
+            del self.graph
+        
+        self.view.unload()
+        self.model.unload()
+    
     def show(self, address=None):
         """
         Show the microcode explorer.
@@ -236,6 +244,10 @@ class MicrocodeExplorerModel(object):
         self.position_changed = CallbackHandler(self, name="position changed")
         self.maturity_changed = CallbackHandler(self, name="maturity changed")
     
+    def unload(self):
+        del self.maturity_changed
+        del self.position_changed
+        del self.mtext_changed
     
     #-------------------------------------------------------------------------
     # Read-Only Properties
@@ -515,6 +527,11 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         # initialize the plugin UI
         self._ui_init()
         self._ui_init_signals()
+    
+    def unload(self):
+        ida_kernwin.close_widget(self._twidget, ida_kernwin.PluginForm.WCLS_DELETE_LATER)
+        self._code_sync.unload()
+        self._ui_hooks.unhook()
     
     def notify_change(self, option_name, option_value, **kwargs):
         """

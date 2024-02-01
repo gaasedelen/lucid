@@ -160,11 +160,9 @@ def _recurseive_reload(module, target_name, visited):
             #print("TODO: should probably try harder to reload this...", attribute_name, type(attribute_value))
             continue
         else:
-            print("**** OH NOO RELOADING IS HARD")
+            print("**** OH NOO RELOADING IS HARD - UNKNOWN TYPE", attribute_name, type(attribute_value))
             attribute_module_name = attribute_value.__class__.__name__
             attribute_module = attribute_value.__class__.__module__
-            print("UNKNOWN TYPE TO RELOAD", attribute_name, type(attribute_value))
-            return
 
         if not target_name in attribute_module_name:
             #print(" - Not a module of interest...")
