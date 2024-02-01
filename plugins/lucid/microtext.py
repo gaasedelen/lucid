@@ -755,17 +755,6 @@ def translate_mtext_position(position, mtext_src, mtext_dst):
     """
     line_num, x, y = position
 
-    #
-    # while this isn't strictly required, let's enforce it. this basically
-    # means that we won't allow you to translate a position from maturity
-    # levels that are more than one degree apart.
-    #
-    # eg, no hopping from maturity 0 --> 7 instead, you must translate
-    # through each layer 0 -> 1 -> 2 -> ... -> 7
-    # 
-
-    assert abs(mtext_src.mba.maturity - mtext_dst.mba.maturity) <= 1
-
     # get the line the cursor falls on
     line = mtext_src.lines[line_num]
 
