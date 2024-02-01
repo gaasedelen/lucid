@@ -530,8 +530,7 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
     
     def unload(self):
         ida_kernwin.close_widget(self._twidget, ida_kernwin.PluginForm.WCLS_DELETE_LATER)
-        self._code_sync.unload()
-        self._ui_hooks.unhook()
+        self._cleanup_hooks()
     
     def notify_change(self, option_name, option_value, **kwargs):
         """
@@ -555,12 +554,15 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
 
         self._code_sync.hook()
 
+    def _cleanup_hooks(self):
+        self._code_sync.unhook()
+        self._ui_hooks.unhook()
+    
     def _cleanup(self):
         self.visible = False
         self._twidget = None
         self.widget = None
-        self._code_sync.unhook()
-        self._ui_hooks.unhook()
+        self._cleanup_hooks()
         # TODO cleanup controller / model
 
     #--------------------------------------------------------------------------
@@ -598,9 +600,11 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
                 if twidget == self._twidget:
                     self.visible = False
                     self._cleanup()
+                    self.notify_deletion() #XXX/HACK: sigh...
             def widget_visible(_, twidget):
                 if twidget == self._twidget:
                     self.visible = True
+                    self.notify_creation() #XXX/HACK: sigh...
             def postprocess_action(_, *args):
                 # XXX: seemingly the only way to allow the explorer to navigate via keyboard events...
                 # (maybe this should be hooked elsewhere?)
@@ -641,6 +645,7 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         self._checkbox_sync = QtWidgets.QCheckBox("Sync hexrays")
         self._checkbox_sync.setCheckState(QtCore.Qt.Checked)
         self._checkbox_devmode = QtWidgets.QCheckBox("Developer mode")
+        
         
         self._refresh_button = QtWidgets.QPushButton("Refresh view")
         self._refresh_button.setFixedSize(120, 60)
@@ -689,6 +694,11 @@ class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ Mic
         self._checkbox_verbose.stateChanged.connect(lambda x: self.controller.set_option('verbose', bool(x)))
         self._checkbox_sync.stateChanged.connect(lambda x: self._code_sync.enable_sync(bool(x)))
         self._checkbox_devmode.stateChanged.connect(lambda x: self.controller.set_option('developer_mode', bool(x)))
+
+        if MicrocodeOptions.verbose:
+            self._checkbox_verbose.setCheckState(QtCore.Qt.Checked)
+        if MicrocodeOptions.developer_mode:
+            self._checkbox_devmode.setCheckState(QtCore.Qt.Checked)
 
         # model signals
         self.model.mtext_changed += self.reinit

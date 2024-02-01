@@ -107,6 +107,10 @@ class CallbackHandler:
         self.callbacks_list = []
         self._ready = True
     
+    def __del__(self):
+        self.callbacks_list = []
+        self._ready = False
+    
     def __call__(self, *args):
         """
         Notify listeners of an event.

@@ -1,6 +1,7 @@
 import ida_idaapi
 import ida_kernwin
 
+from lucid.microtext import MicrocodeOptions
 from lucid.util.ida import UIHooks, IDACtxEntry, hexrays_available
 from lucid.ui.explorer import MicrocodeExplorer
 
@@ -37,7 +38,9 @@ class LucidCore(object):
         class UIHooks(ida_kernwin.UI_Hooks):
             def ready_to_run(self):
                 pass
-
+        
+        MicrocodeOptions.clear_listeners()
+        
         self._startup_hooks = UIHooks()
         self._startup_hooks.ready_to_run = self.load
         

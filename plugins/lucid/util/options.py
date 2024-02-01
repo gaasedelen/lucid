@@ -187,6 +187,9 @@ class OptionProvider(OptionSet):
         self._listeners.remove(listener)
         return True
 
+    def clear_listeners(self):
+        self._listeners.clear()
+
     def clear(self):
         if self._listeners:
             for name, value in self._options:
