@@ -29,18 +29,14 @@ class LucidCore(object):
         self.loaded = False
         self.explorer = None
 
+        MicrocodeOptions.clear_listeners()
+
         #
         # we can 'defer' the load of the plugin core a little bit. this
         # ensures that all the other plugins (eg, decompilers) can get loaded
         # and initialized when opening an idb/bin 
         #
 
-        class UIHooks(ida_kernwin.UI_Hooks):
-            def ready_to_run(self):
-                pass
-        
-        MicrocodeOptions.clear_listeners()
-        
         self._startup_hooks = UIHooks()
         self._startup_hooks.ready_to_run = self.load
         
@@ -61,7 +57,7 @@ class LucidCore(object):
         """
         self._startup_hooks.unhook()
 
-        # the plugin will only load for decompiler-capabale IDB's / installs
+        # the plugin will only load for decompiler-capable IDB's / installs
         if not hexrays_available():
             return
 

@@ -187,7 +187,8 @@ class MicroSubtreeView(ida_graph.GraphViewer):
         for oprop, name in [(getattr(ida_hexrays, x), x) for x in filter(lambda y: y.startswith('OPROP_'), dir(ida_hexrays))]:
             if mop.oprops & oprop:
                 text += f" +{name[6:]}"
-        return text          
+        return text
+
     def _insert_mop(self, mop, parent):
         if mop.t == 0:
             return -1

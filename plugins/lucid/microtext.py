@@ -3,12 +3,10 @@ import ida_funcs
 import ida_lines
 import ida_idaapi
 import ida_hexrays
-import ida_hexrays as hr # M.K. 1/23/2024
-import ida_kernwin
 
 from lucid.text import TextCell, TextToken, TextLine, TextBlock
 from lucid.util.ida import tag_text
-from lucid.util.hexrays import get_mmat_name, get_microcode
+from lucid.util.hexrays import get_microcode, IPROP_FLAG_NAMES, MBL_TYPE_NAMES, MBL_PROP_NAMES, MBL_FLAG_NAMES
 from lucid.util.options import OptionListener, OptionProvider
 
 #-----------------------------------------------------------------------------
@@ -30,6 +28,16 @@ from lucid.util.options import OptionListener, OptionProvider
 #
 
 #-----------------------------------------------------------------------------
+# Options
+#-----------------------------------------------------------------------------
+
+MicrocodeOptions = OptionProvider({
+    # options defined here can be accessed like normal class members ;)
+    'developer_mode': False,
+    'verbose': False,
+})
+
+#-----------------------------------------------------------------------------
 # Annotation Tokens
 #-----------------------------------------------------------------------------
 #
@@ -47,14 +55,6 @@ MAGIC_BLK_DEF  = 0x1234
 MAGIC_BLK_DNU  = 0x1235
 MAGIC_BLK_VAL  = 0x1236
 MAGIC_BLK_TERM = 0x1237
-    
-
-MicrocodeOptions = OptionProvider({
-    # options defined here can be accessed like normal class members ;)
-    'developer_mode': False,
-    'verbose': False,
-})
-
 
 class BlockHeaderLine(TextLine):
     """
@@ -209,7 +209,6 @@ class MicroInstructionToken(TextToken):
         return subop
 
 class InstructionCommentToken(TextToken):
-    
     """
     A container token for micro-instruction comment text.
     """
@@ -229,24 +228,8 @@ class InstructionCommentToken(TextToken):
         items.append(AddressToken(insn.ea))
         
         if MicrocodeOptions.developer_mode:
-            insn_flags = {
-                hr.IPROP_ASSERT: "ASSERT",
-                hr.IPROP_PERSIST: "PERSIST",
-                hr.IPROP_MBARRIER: "MBARRIER",
-                hr.IPROP_OPTIONAL: "OPT",
-                hr.IPROP_COMBINED: "COMB",
-                hr.IPROP_DONT_PROP: "NO_PROP",
-                hr.IPROP_DONT_COMB: "NO_COMB",
-                hr.IPROP_INV_JX: "INV_JX",
-                hr.IPROP_FPINSN: "FPINSN",
-                hr.IPROP_EXTSTX: "EXTSTX",
-                hr.IPROP_FARCALL: "FARCALL",
-                hr.IPROP_TAILCALL: "TAILCALL",
-                hr.IPROP_MULTI_MOV: "MULTI_MOV",
-                hr.IPROP_WAS_NORET: "WAS_NORET",
-            }
             
-            if insn_tokens := [TextCell(name) for flag, name in insn_flags.items() if insn.iprops & flag]:
+            if insn_tokens := [TextCell(name) for flag, name in IPROP_FLAG_NAMES.items() if insn.iprops & flag]:
                 items.extend([TextCell(" ")] + [x for flag in insn_tokens for x in (TextCell(" +"), flag)])
             
         # append the use/def list
@@ -345,64 +328,19 @@ class MicroBlockText(TextBlock):
         blk, mba = self.blk, self.blk.mba
         lines = []
 
-        # block type names
-        type_names = \
-        {
-            ida_hexrays.BLT_NONE: "????",
-            ida_hexrays.BLT_STOP: "STOP",
-            ida_hexrays.BLT_0WAY: "0WAY",
-            ida_hexrays.BLT_1WAY: "1WAY",
-            ida_hexrays.BLT_2WAY: "2WAY",
-            ida_hexrays.BLT_NWAY: "NWAY",
-            ida_hexrays.BLT_XTRN: "XTRN",
-        } 
-
-        blk_type = type_names[blk.type]
-        blk_props = {
-            hr.MBL_PRIV: "PRIVATE",
-            hr.MBL_FAKE: "FAKE",
-            hr.MBL_NORET: "NORET",
-            hr.MBL_DSLOT: "DSLOT",
-            hr.MBL_GOTO: "GOTO",
-            hr.MBL_TCAL: "TAILCALL",
-        }
-        blk_flags ={
-            hr.MBL_KEEP: "KEEP",
-            hr.MBL_PROP: "PROP",
-            hr.MBL_COMB: "COMB",
-            hr.MBL_PUSH: "PUSH",
-            hr.MBL_CALL: "CALL",
-            hr.MBL_DMT64: "DMT_64BIT",
-            hr.MBL_INCONST: "INCONST",
-            hr.MBL_BACKPROP: "BACKPROP",
-            hr.MBL_VALRANGES: "VALRANGES",
-        }
+        blk_type = MBL_TYPE_NAMES[blk.type]
 
         # block properties
         prop_tokens = []
         flag_tokens = []
 
-        for flag, name in blk_props.items():
+        for flag, name in MBL_PROP_NAMES.items():
             if blk.flags & flag:
                 prop_tokens.append(TextCell(name))
-        for flag, name in blk_flags.items():
+
+        for flag, name in MBL_FLAG_NAMES.items():
             if blk.flags & flag:
                 flag_tokens.append(TextCell(name))
-        
-        #if blk.flags & ida_hexrays.MBL_DSLOT:
-        #    prop_tokens.append(TextCell("DSLOT"))
-        #if blk.flags & ida_hexrays.MBL_NORET:
-        #    prop_tokens.append(TextCell("NORET"))
-        #if blk.needs_propagation():
-        #    prop_tokens.append(TextCell("PROP"))
-        #if blk.flags & ida_hexrays.MBL_COMB:
-        #    prop_tokens.append(TextCell("COMB"))
-        #if blk.flags & ida_hexrays.MBL_PUSH:
-        #    prop_tokens.append(TextCell("PUSH"))
-        #if blk.flags & ida_hexrays.MBL_TCAL:
-        #    prop_tokens.append(TextCell("TAILCALL"))
-        #if blk.flags & ida_hexrays.MBL_FAKE:
-        #    prop_tokens.append(TextCell("FAKE"))
 
         # misc block info
         prop_tokens = [x for prop in prop_tokens for x in (prop, TextCell(" "))]
@@ -444,7 +382,6 @@ class MicroBlockText(TextBlock):
                 lines.extend(use_defs)
             else:
                 lines.append(BlockHeaderLine([TextCell("- USE-DEF LISTS ARE EMPTY")], MAGIC_BLK_UDNR, parent=self))
-                
 
         return lines
 
@@ -561,12 +498,16 @@ class MicrocodeText(TextBlock):
         """
         Reinitialize the underlying microcode and regenerate text.
         """
+
+        # get the most up-to-date microcode
         if not self.premade:
-            # get the most up-to-date microcode
             self.func = ida_funcs.get_func(self.func.start_ea)
             self.mba = get_microcode(self.func, self.maturity)
-        else: # do a one-time skip if we were just created/copied
+
+         # do a one-time skip if we were just created/copied
+        else:
             self.premade = False
+
         self.refresh()
 
     def refresh(self, maturity=None):
@@ -901,15 +842,18 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
             return (line_num_dst, x_dst, y)
     
     def get_best_ancestor_token():
+
         # common 'ancestor', eg the target token actually got its address from an ancestor
         token_src_ancestor = token_src.ancestor_with_address()
         for token in tokens:
             if token.text == token_src_ancestor.text:
                 return token
+
         # last ditch effort, try to land on a text that matches the target token
         for token in tokens:
             if token_src.text in token.text: 
                 return token
+
         return None
     
     if token := get_best_ancestor_token():
@@ -921,12 +865,6 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
     # yolo, just land on whatever token available 
     line_num, x = mtext_dst.get_pos_of_token(tokens[0])
     return (line_num, x, y)
-    
-    
-            
-    
-    
-    
 
 #-----------------------------------------------------------------------------
 # Position Remapping
