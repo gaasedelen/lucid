@@ -1,10 +1,13 @@
+from typing import Any
+import ida_funcs
 import ida_lines
 import ida_idaapi
 import ida_hexrays
 
 from lucid.text import TextCell, TextToken, TextLine, TextBlock
 from lucid.util.ida import tag_text
-from lucid.util.hexrays import get_mmat_name
+from lucid.util.hexrays import get_microcode, IPROP_FLAG_NAMES, MBL_TYPE_NAMES, MBL_PROP_NAMES, MBL_FLAG_NAMES
+from lucid.util.options import OptionListener, OptionProvider
 
 #-----------------------------------------------------------------------------
 # Microtext
@@ -23,6 +26,16 @@ from lucid.util.hexrays import get_mmat_name
 #    interactive text interface that allows one to explore or manipulate
 #    the microcode. For more information about the Text* classes, see text.py
 #
+
+#-----------------------------------------------------------------------------
+# Options
+#-----------------------------------------------------------------------------
+
+MicrocodeOptions = OptionProvider({
+    # options defined here can be accessed like normal class members ;)
+    'developer_mode': False,
+    'verbose': False,
+})
 
 #-----------------------------------------------------------------------------
 # Annotation Tokens
@@ -160,7 +173,9 @@ class MicroInstructionToken(TextToken):
     FLAGS = ida_hexrays.SHINS_VALNUM | ida_hexrays.SHINS_SHORT
 
     def __init__(self, insn, index, parent_token):
-        super(MicroInstructionToken, self).__init__(insn._print(self.FLAGS), parent=parent_token)
+        insn_text = insn._print(self.FLAGS)
+        
+        super(MicroInstructionToken, self).__init__(insn_text, parent=parent_token)
         self.index = index
         self.insn = insn
         self._generate_from_insn()
@@ -211,7 +226,12 @@ class InstructionCommentToken(TextToken):
 
         # append the instruction address
         items.append(AddressToken(insn.ea))
-
+        
+        if MicrocodeOptions.developer_mode:
+            
+            if insn_tokens := [TextCell(name) for flag, name in IPROP_FLAG_NAMES.items() if insn.iprops & flag]:
+                items.extend([TextCell(" ")] + [x for flag in insn_tokens for x in (TextCell(" +"), flag)])
+            
         # append the use/def list
         if usedef:
             use_def_tokens = self._generate_use_def(blk, insn)
@@ -234,15 +254,14 @@ class InstructionCommentToken(TextToken):
         # use list
         must_use = blk.build_use_list(insn, ida_hexrays.MUST_ACCESS)
         may_use = blk.build_use_list(insn, ida_hexrays.MAY_ACCESS)
-
-        use_str = generate_mlist_str(must_use, may_use)
-        items.append(TextCell(" u=%-13s" % use_str))
+        if use_str := generate_mlist_str(must_use, may_use):
+            items.append(TextCell(" u=%-13s" % use_str))
 
         # def list
         must_def = blk.build_def_list(insn, ida_hexrays.MUST_ACCESS)
         may_def = blk.build_def_list(insn, ida_hexrays.MAY_ACCESS)
-        def_str = generate_mlist_str(must_def, may_def)
-        items.append(TextCell(" d=%-13s" % def_str))
+        if def_str := generate_mlist_str(must_def, may_def):
+            items.append(TextCell(" d=%-13s" % def_str))
 
         return items
 
@@ -267,19 +286,16 @@ class MicroBlockText(TextBlock):
     High level text wrapper of a micro-block (mblock_t).
     """
     
-    def __init__(self, blk, verbose=False):
+    def __init__(self, blk):
         super(MicroBlockText, self).__init__()
         self.instructions = []
-        self.verbose = verbose
         self.blk = blk
         self.refresh()
 
-    def refresh(self, verbose=None):
+    def refresh(self):
         """
         Regenerate the micro-block text.
         """
-        if verbose is not None:
-            self.verbose = verbose
         self._generate_from_blk()
         self._generate_lines()
         self._generate_token_address_map()
@@ -312,37 +328,19 @@ class MicroBlockText(TextBlock):
         blk, mba = self.blk, self.blk.mba
         lines = []
 
-        # block type names
-        type_names = \
-        {
-            ida_hexrays.BLT_NONE: "????",
-            ida_hexrays.BLT_STOP: "STOP",
-            ida_hexrays.BLT_0WAY: "0WAY",
-            ida_hexrays.BLT_1WAY: "1WAY",
-            ida_hexrays.BLT_2WAY: "2WAY",
-            ida_hexrays.BLT_NWAY: "NWAY",
-            ida_hexrays.BLT_XTRN: "XTRN",
-        } 
-
-        blk_type = type_names[blk.type]
+        blk_type = MBL_TYPE_NAMES[blk.type]
 
         # block properties
         prop_tokens = []
+        flag_tokens = []
 
-        if blk.flags & ida_hexrays.MBL_DSLOT:
-            prop_tokens.append(TextCell("DSLOT"))
-        if blk.flags & ida_hexrays.MBL_NORET:
-            prop_tokens.append(TextCell("NORET"))
-        if blk.needs_propagation():
-            prop_tokens.append(TextCell("PROP"))
-        if blk.flags & ida_hexrays.MBL_COMB:
-            prop_tokens.append(TextCell("COMB"))
-        if blk.flags & ida_hexrays.MBL_PUSH:
-            prop_tokens.append(TextCell("PUSH"))
-        if blk.flags & ida_hexrays.MBL_TCAL:
-            prop_tokens.append(TextCell("TAILCALL"))
-        if blk.flags & ida_hexrays.MBL_FAKE:
-            prop_tokens.append(TextCell("FAKE"))
+        for flag, name in MBL_PROP_NAMES.items():
+            if blk.flags & flag:
+                prop_tokens.append(TextCell(name))
+
+        for flag, name in MBL_FLAG_NAMES.items():
+            if blk.flags & flag:
+                flag_tokens.append(TextCell(name))
 
         # misc block info
         prop_tokens = [x for prop in prop_tokens for x in (prop, TextCell(" "))]
@@ -365,12 +363,25 @@ class MicroBlockText(TextBlock):
             edge_tokens = [TextCell("- ")] + inbound_tokens + outbound_tokens
             lines.append(BlockHeaderLine(edge_tokens, MAGIC_BLK_EDGE, parent=self))
 
+        if flag_tokens:
+            last_token = len(flag_tokens) - 1
+            if last_token:
+                def _get_splitter(i):
+                    return TextCell(" | ") if i != last_token else TextCell("]")
+                
+                flag_tokens_split = [x for i,flag in enumerate(flag_tokens) for x in (flag, _get_splitter(i))]
+                lines.append(BlockHeaderLine([TextCell("FLAGS: [")] + flag_tokens_split, MAGIC_BLK_UDNR, parent=self))
+            else:
+                lines.append(BlockHeaderLine([TextCell("FLAGS: [")] + flag_tokens + [TextCell("]")], MAGIC_BLK_UDNR, parent=self))
+        
         # only generate use/def comments if in verbose mode
-        if self.verbose:
+        if MicrocodeOptions.verbose:
             if not blk.lists_ready():
                 lines.append(BlockHeaderLine([TextCell("- USE-DEF LISTS ARE NOT READY")], MAGIC_BLK_UDNR, parent=self))
+            elif use_defs := self._generate_use_def(blk):
+                lines.extend(use_defs)
             else:
-                lines.extend(self._generate_use_def(blk))
+                lines.append(BlockHeaderLine([TextCell("- USE-DEF LISTS ARE EMPTY")], MAGIC_BLK_UDNR, parent=self))
 
         return lines
 
@@ -379,21 +390,18 @@ class MicroBlockText(TextBlock):
         Generate use/def comments for this block.
         """
         lines = []
-
-        # use list
-        use_str = generate_mlist_str(blk.mustbuse, blk.maybuse)
-        if use_str:
-            lines.append(BlockHeaderLine([TextCell("- USE: %s" % use_str)], MAGIC_BLK_USE, parent=self))
-
-        # def list
-        def_str = generate_mlist_str(blk.mustbdef, blk.maybdef)
-        if def_str:
-            lines.append(BlockHeaderLine([TextCell("- DEF: %s" % def_str)], MAGIC_BLK_DEF, parent=self))
-
-        # dnu list
-        dnu_str = generate_mlist_str(blk.dnu)
-        if dnu_str:
-            lines.append(BlockHeaderLine([TextCell("- DNU: %s" % dnu_str)], MAGIC_BLK_DNU, parent=self))
+        
+        usedef_lists = {
+            'USE': (MAGIC_BLK_USE, (blk.mustbuse, blk.maybuse)), # use list
+            'DEF': (MAGIC_BLK_DEF, (blk.mustbdef, blk.maybdef)), # def list
+            'DNU': (MAGIC_BLK_DNU, (blk.dnu, None)), # dnu list
+        }
+        
+        for mblkname, mblkdata in usedef_lists.items():
+            blkmagic, (blkmust, blkmay) = mblkdata
+            if list_str := generate_mlist_str(blkmust, blkmay):
+                line = BlockHeaderLine([TextCell(f"- {mblkname}: {list_str}")], blkmagic, parent=self)
+                lines.append(line)
 
         return lines
 
@@ -402,7 +410,7 @@ class MicroBlockText(TextBlock):
         Generate a block/index prefixed line for a given instruction token.
         """
         prefix_token = LinePrefixToken(self.blk.serial, idx)
-        cmt_token = InstructionCommentToken(self.blk, ins_token.insn, self.verbose)
+        cmt_token = InstructionCommentToken(self.blk, ins_token.insn)
 
         cmt_padding = max(50 - (len(prefix_token.text) + len(ins_token.text)), 1)
         padding_token = TextCell(" " * cmt_padding)
@@ -456,21 +464,60 @@ class MicrocodeText(TextBlock):
     High level text wrapper of a micro-block-array (mba_t).
     """
     
-    def __init__(self, mba, verbose=False):
+    def __init__(self, maturity):
         super(MicrocodeText, self).__init__()
-        self.verbose = verbose
-        self.mba = mba
+        self.maturity = maturity
+        self.premade = False
+        self.generation = 0
+    
+    @classmethod
+    def create(cls, func, maturity):
+        """
+        Create a new instance of the class. Does not generate any of its contents.
+        """
+        mtext = MicrocodeText(maturity)
+        mtext.func = func
+        mtext.mba = get_microcode(func, maturity)
+        mtext.premade = True
+        return mtext
+    
+    def copy(self):
+        """
+        Create a copy of the microcode. Does not generate any of its contents.
+        """
+        mtext = MicrocodeText(self.maturity)
+        mtext.func = self.func
+        mtext.mba = self.mba
+        mtext.premade = True
+        return mtext
+    
+    def is_pending(self):
+        return self.generation == 0
+    
+    def reinit(self):
+        """
+        Reinitialize the underlying microcode and regenerate text.
+        """
+
+        # get the most up-to-date microcode
+        if not self.premade:
+            self.func = ida_funcs.get_func(self.func.start_ea)
+            self.mba = get_microcode(self.func, self.maturity)
+
+         # do a one-time skip if we were just created/copied
+        else:
+            self.premade = False
+
         self.refresh()
 
-    def refresh(self, verbose=None):
+    def refresh(self, maturity=None):
         """
         Regenerate the microcode text.
         """
-        if verbose is not None:
-            self.verbose = verbose
         self._generate_from_mba()
         self._generate_lines()
         self._generate_token_address_map()
+        self.generation += 1
 
     def _generate_from_mba(self):
         """
@@ -478,9 +525,12 @@ class MicrocodeText(TextBlock):
         """
         blks = []
         
+        if not self.mba:
+            raise Exception("The requested microcode block is invalid.")
+        
         for blk_idx in range(self.mba.qty):
             blk = self.mba.get_mblock(blk_idx)
-            blk_token = MicroBlockText(blk, self.verbose)
+            blk_token = MicroBlockText(blk)
             blks.append(blk_token)
 
         self.blks = blks
@@ -489,12 +539,23 @@ class MicrocodeText(TextBlock):
         """
         Populate the line array for this mba_t.
         """
-        lines = []
-
-        for blk in self.blks:
-            lines.extend(blk.lines)
-        
-        self.lines = lines
+        self.lines = [line for blk in self.blks for line in blk.lines]
+    
+    def iter_block_token_preds(self, blk_token):
+        """
+        Iterate through the blocks specified by the tokens predecessors.
+        """
+        blk = blk_token.blk
+        for serial in range(blk.npred()):
+            yield self.blks[blk.pred(serial)]
+    
+    def iter_block_token_succs(self, blk_token):
+        """
+        Iterate through the blocks specified by the tokens successors.
+        """
+        blk = blk_token.blk
+        for serial in range(blk.nsucc()):
+            yield self.blks[blk.succ(serial)]
 
     def get_block_for_line(self, line):
         """
@@ -540,31 +601,36 @@ def generate_mlist_str(must, maybe=None):
     """
     Generate the use/def string given must-use and maybe-use lists.
     """
-    must_regs = must.reg.dstr().split(",")
-    must_mems = must.mem.dstr().split(",")
-
-    maybe_regs = maybe.reg.dstr().split(",") if maybe else []
-    maybe_mems = maybe.mem.dstr().split(",") if maybe else []
-
-    for splits in [must_regs, must_mems, maybe_regs, maybe_mems]:
-        splits[:] = list(filter(None, splits))[:] # lol
-
-    maybe_regs = list(filter(lambda x: x not in must_regs, maybe_regs))
-    maybe_mems = list(filter(lambda x: x not in must_mems, maybe_mems))
-
-    must_str = ', '.join(must_regs + must_mems)
-    maybe_str = ', '.join(maybe_regs + maybe_mems)
-
-    if must_str and maybe_str:
-        full_str = "%s (%s)" % (must_str, maybe_str)
-    elif must_str:
-        full_str = must_str
-    elif maybe_str:
-        full_str = "(%s)" % maybe_str
-    else:
-        full_str = ""
     
-    return full_str
+    def get_usage_lists(must_use, may_use):
+        must_uses = list(filter(None, must_use.dstr().split(",")))
+        
+        def may_use_valid(may_use):
+            return may_use and may_use not in must_uses
+        
+        if not must_uses:
+            may_use_valid = None # no point in checking if in an empty list
+        
+        may_uses = list(filter(may_use_valid, may_use.dstr().split(","))) if may_use else []
+        
+        return must_uses, may_uses
+    
+    must_regs, maybe_regs = get_usage_lists(must.reg, maybe.reg if maybe else None)
+    must_mems, maybe_mems = get_usage_lists(must.mem, maybe.mem if maybe else None)
+    
+    must_uses = must_regs + must_mems
+    maybe_uses = maybe_regs + maybe_mems
+    
+    if not must_uses and not maybe_uses:
+        return None
+    
+    must_str = ', '.join(must_uses) if must_uses else None
+    maybe_str = ', '.join(maybe_uses) if maybe_uses else None
+    
+    if maybe_str:
+        maybe_str = '({})'.format(maybe_str)
+    
+    return ' '.join(filter(None, (must_str, maybe_str)))
 
 def find_similar_block(blk_token_src, mtext_dst):
     """
@@ -576,20 +642,23 @@ def find_similar_block(blk_token_src, mtext_dst):
     # search through all the blocks in the target mba/mtext for a similar block
     for blk_token_dst in mtext_dst.blks:
         blk_dst = blk_token_dst.blk
+        
+        fallback = None
 
-        # 1 for 1 block match (start addr, end addr)
-        if (blk_dst.start == blk_src.start and blk_dst.end == blk_src.end):
-            return blk_token_dst
-
-        # matching block starts
-        # TODO/COMMENT: explain the serial != 0 case
-        elif (blk_dst.start == blk_src.start and blk_dst.serial != 0):
-            fallbacks.append(blk_token_dst)
-
-        # block got merged into another block
+        if blk_dst.start == blk_src.start:
+            if blk_dst.end == blk_src.end:
+                # 1 for 1 block match (start addr, end addr)
+                return blk_token_dst
+            if blk_dst.serial != 0:
+                # matching block starts
+                # TODO/COMMENT: explain the serial != 0 case
+                fallback = blk_token_dst
         elif (blk_dst.start < blk_src.start < blk_dst.end):
-            fallbacks.append(blk_token_dst)
+            # block got merged into another block
+            fallback = blk_token_dst
 
+        if fallback:
+            fallbacks.append(fallback)
     #
     # there doesn't appear to be any blocks in this mtext that seem similar to
     # the given block. this should seldom happen.. if ever ?
@@ -627,17 +696,6 @@ def translate_mtext_position(position, mtext_src, mtext_dst):
     """
     line_num, x, y = position
 
-    #
-    # while this isn't strictly required, let's enforce it. this basically
-    # means that we won't allow you to translate a position from maturity
-    # levels that are more than one degree apart.
-    #
-    # eg, no hopping from maturity 0 --> 7 instead, you must translate
-    # through each layer 0 -> 1 -> 2 -> ... -> 7
-    # 
-
-    assert abs(mtext_src.mba.maturity - mtext_dst.mba.maturity) <= 1
-
     # get the line the cursor falls on
     line = mtext_src.lines[line_num]
 
@@ -655,57 +713,53 @@ def translate_block_header_position(position, mtext_src, mtext_dst):
 
     # get the line the given position falls within on the source mtext
     line = mtext_src.lines[line_num]
+    
 
     # get the block the given position falls within on the source mtext
     blk_token_src = mtext_src.get_block_for_line(line)
 
     # find a block in the dest mtext that seems to match the source block
-    blk_token_dst = find_similar_block(blk_token_src, mtext_dst)
-
-    if blk_token_dst:
+    if blk_token_dst := find_similar_block(blk_token_src, mtext_dst):
         ins_src = set([x.address for x in blk_token_src.instructions])
-        ins_dst = set([x.address for x in blk_token_dst.instructions]) 
-        translate_header = (ins_src == ins_dst or blk_token_dst.blk.start == blk_token_src.blk.start)
-    else:
-        translate_header = False
-
-    #
-    # if we think we have found a suitable matching block, translate the given
-    # position from the src block header to the destination one
-    #
-
-    if translate_header:
-
-        # get the equivalent header line from the destination block
-        line_dst = blk_token_dst.get_special_line(line.type)
-
+        ins_dst = set([x.address for x in blk_token_dst.instructions])
+        
         #
-        # if a matching header line doesn't exist in the dest, attempt
-        # to match the line 'depth' into the header instead.. this will
-        # help with the illusion of the 'stationary' user cursor
+        # if we think we have found a suitable matching block, translate the given
+        # position from the src block header to the destination one
         #
 
-        if not line_dst:
-            line_idx = blk_token_src.lines.index(line)
+        if (ins_src == ins_dst) or (blk_token_dst.blk.start == blk_token_src.blk.start):
 
-            try:
+            # get the equivalent header line from the destination block
+            line_dst = blk_token_dst.get_special_line(line.type)
 
-                line_dst = blk_token_dst.lines[line_idx]
-                if not line_dst.type:
-                    raise
             #
-            # either the destination block didn't have enough lines
-            # to fufill the 'stationary' illusion, or the target
-            # line wasn't a block header line. in these cases, just
-            # fallback to mapping the cursor to the top of the block
+            # if a matching header line doesn't exist in the dest, attempt
+            # to match the line 'depth' into the header instead.. this will
+            # help with the illusion of the 'stationary' user cursor
             #
 
-            except:
-                line_dst = blk_token_dst.lines[0]
+            if not line_dst:
+                line_idx = blk_token_src.lines.index(line)
 
-        # return the target/
-        line_num_dst = mtext_dst.lines.index(line_dst)
-        return (line_num_dst, 0, y)
+                try:
+
+                    line_dst = blk_token_dst.lines[line_idx]
+                    if not line_dst.type:
+                        raise
+                #
+                # either the destination block didn't have enough lines
+                # to fufill the 'stationary' illusion, or the target
+                # line wasn't a block header line. in these cases, just
+                # fallback to mapping the cursor to the top of the block
+                #
+
+                except:
+                    line_dst = blk_token_dst.lines[0]
+
+            # return the target/
+            line_num_dst = mtext_dst.lines.index(line_dst)
+            return (line_num_dst, 0, y)
     
     #
     # if the block header the cursor was on in the source mtext has
@@ -720,9 +774,8 @@ def translate_block_header_position(position, mtext_src, mtext_dst):
     #
 
     for ins_token in blk_token_src.instructions:
-        tokens_dst = mtext_dst.get_tokens_for_address(ins_token.address)
-        if tokens_dst:
-            line_num, x = mtext_dst.get_pos_of_token(tokens_dst[0])
+        if token_dst := mtext_dst.get_first_token_for_address(ins_token.address):
+            line_num, x = mtext_dst.get_pos_of_token(token_dst)
             return (line_num, x, y)
 
     #
@@ -737,7 +790,6 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
     Translate an instruction position from one mtext to another.
     """
     line_num, x, y = position
-    token_src = mtext_src.get_token_at_position(line_num, x)
     address_src = mtext_src.get_address_at_position(line_num, x)
 
     #
@@ -745,8 +797,7 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
     # current address
     #
 
-    line_nums_dst = mtext_dst.get_line_nums_for_address(address_src)
-    if not line_nums_dst:
+    if not mtext_dst.line_nums_contain_address(address_src):
         return None
 
     # get the line the given position falls within on the source mtext
@@ -754,7 +805,6 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
 
     # get the block the given position falls within on the source mtext
     blk_token_src = mtext_src.get_block_for_line(line)
-    blk_src = blk_token_src.blk
 
     # find a block in the dest mtext that seems to match the source block
     blk_token_dst = find_similar_block(blk_token_src, mtext_dst)
@@ -766,11 +816,7 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
     # our position in the source mtext.
     #
 
-    if blk_token_dst:
-        blk_dst = blk_token_dst.blk
-        tokens = blk_token_dst.get_tokens_for_address(address_src)
-    else:
-        tokens = []
+    tokens = blk_token_dst.get_tokens_for_address(address_src) if blk_token_dst else []
 
     #
     # no tokens matching the target address in the 'similar' dest block (or
@@ -782,35 +828,39 @@ def translate_instruction_position(position, mtext_src, mtext_dst):
         tokens = mtext_dst.get_tokens_for_address(address_src)
         assert tokens, "This should never happen because line_nums_dst... ?"
 
+    token_src = mtext_src.get_token_at_position(line_num, x)
+
     # compute the relative cursor address into the token text
     _, x_base_src = mtext_src.get_pos_of_token(token_src)
     x_rel = (x - x_base_src)
-
+    
     # 1 for 1 token match
     for token in tokens:
         if token.text == token_src.text:
             line_num_dst, x_dst = mtext_dst.get_pos_of_token(token)
             x_dst += x_rel
             return (line_num_dst, x_dst, y)
+    
+    def get_best_ancestor_token():
 
-    # common 'ancestor', eg the target token actually got its address from an ancestor  
-    token_src_ancestor = token_src.ancestor_with_address()
-    for token in tokens:
-        line_num, x_dst = mtext_dst.get_pos_of_token(token)
-        if token.text == token_src_ancestor.text:
-            line_num, x_dst = mtext_dst.get_pos_of_token(token)
-            x_dst_base = token.text.index(token_src.text)
-            x_dst += x_dst_base + x_rel # oof
-            return (line_num, x_dst, y)
+        # common 'ancestor', eg the target token actually got its address from an ancestor
+        token_src_ancestor = token_src.ancestor_with_address()
+        for token in tokens:
+            if token.text == token_src_ancestor.text:
+                return token
 
-    # last ditch effort, try to land on a text that matches the target token
-    for token in tokens:
+        # last ditch effort, try to land on a text that matches the target token
+        for token in tokens:
+            if token_src.text in token.text: 
+                return token
+
+        return None
+    
+    if token := get_best_ancestor_token():
         line_num, x_dst = mtext_dst.get_pos_of_token(token)
-        if token_src.text in token.text:
-            line_num, x_dst = mtext_dst.get_pos_of_token(token)
-            x_dst_base = token.text.index(token_src.text)
-            x_dst += x_dst_base + x_rel # oof
-            return (line_num, x_dst, y)
+        x_dst_base = token.text.index(token_src.text)
+        x_dst += x_dst_base + x_rel # oof
+        return (line_num, x_dst, y)
     
     # yolo, just land on whatever token available 
     line_num, x = mtext_dst.get_pos_of_token(tokens[0])
@@ -855,12 +905,10 @@ def remap_mtext_position(position, mtext_src, mtext_dst):
     #
 
     line_max = len(mtext_dst.lines)
-    if position[0] < line_max:
-        line_num = position[0]
-    else:
+    if line_num >= line_max:
         line_num = max(line_max - 1, 0)
-
-    return (line_num, position[1], position[2])
+    
+    return (line_num, x, y)
 
 def remap_block_header_position(position, mtext_src, mtext_dst):
     """
@@ -880,22 +928,19 @@ def remap_block_header_position(position, mtext_src, mtext_dst):
         if blk_token in blks_visited:
             continue
 
-        blk_token_dst = find_similar_block(blk_token, mtext_dst)
-        if blk_token_dst:
+        if blk_token_dst := find_similar_block(blk_token, mtext_dst):
             line_num, x = mtext_dst.get_pos_of_token(blk_token_dst.lines[0])
             return (line_num, x, y)
 
-        remap_tokens = [blk_token.instructions[0]] if blk_token.instructions else []
-
-        for token in remap_tokens:
-            insn_line_num, insn_x = mtext_src.get_pos_of_token(token)
-            projection = remap_instruction_position((insn_line_num, insn_x, y), mtext_src, mtext_dst)
-            if projection:
+        if blk_token.instructions:
+            remap_token = blk_token.instructions[0]
+            insn_line_num, insn_x = mtext_src.get_pos_of_token(remap_token)
+            if projection := remap_instruction_position((insn_line_num, insn_x, y), mtext_src, mtext_dst):
                 return (projection[0], projection[1], y)
 
-        for blk_serial in range(blk_token.blk.nsucc()):
-            blk_token_succ = mtext_src.blks[blk_token.blk.succ(blk_serial)]
-            if blk_token_succ in blks_visited or blk_token_succ in blks_to_visit:
+        for blk_token_succ in mtext_src.iter_block_token_succs(blk_token):
+            if blk_token_succ in blks_visited \
+            or blk_token_succ in blks_to_visit:
                 continue
             blks_to_visit.append(blk_token_succ)
     
@@ -910,20 +955,20 @@ def remap_instruction_position(position, mtext_src, mtext_dst):
 
     # the block in the source mtext where the given position resides
     blk_token_src = mtext_src.get_block_for_line(line)
-    blk_src = blk_token_src.blk
-
     ins_token_src = mtext_src.get_ins_for_line(line)
+    
     pred_addresses = [x.address for x in blk_token_src.instructions[:ins_token_src.index]]
     succ_addresses = [x.address for x in blk_token_src.instructions[ins_token_src.index+1:]]
-    remap_targets = succ_addresses + pred_addresses[::-1]
+    
+    def iter_possible_remap_targets():
+        yield from succ_addresses
+        yield from pred_addresses[::-1]
+        for blk_token_succ in mtext_src.iter_block_token_succs(blk_token_src):
+            yield from [x.address for x in blk_token_succ.instructions]
 
-    for blk_serial in range(blk_src.nsucc()):
-        remap_targets += [x.address for x in mtext_src.blks[blk_src.succ(blk_serial)].instructions]
-
-    for address in remap_targets:
-        new_tokens = mtext_dst.get_tokens_for_address(address)
-        if new_tokens:
-            line_num, x = mtext_dst.get_pos_of_token(new_tokens[0])
+    for address in iter_possible_remap_targets():
+        if token := mtext_dst.get_first_token_for_address(address):
+            line_num, x = mtext_dst.get_pos_of_token(token)
             return (line_num, x, y)
 
     #

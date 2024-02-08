@@ -64,11 +64,11 @@ class LucidPlugin(ida_idaapi.plugin_t):
         """
         Hot-reload the plugin core.
         """
-        print("Reloading...")
+        state = self.core.get_hotload_state()
         self.core.unload()
         reload_package(lucid)
         self.core = lucid.LucidCore()
-        self.core.interactive_view_microcode()
+        self.core.set_hotload_state(state)
 
     def test(self):
         """

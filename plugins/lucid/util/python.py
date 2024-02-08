@@ -93,6 +93,40 @@ def notify_callback(callback_list, *args):
     for callback_ref in cleanup:
         callback_list.remove(callback_ref)
 
+
+#
+# NB: This code is based off of the original callback handling code in 'explorer.py'.
+#
+class CallbackHandler:
+    """
+    A custom callback handler that supports event subscribers.
+    """
+    def __init__(self, owner, name = "-unspecified-"):
+        self.__doc__ = f"Callback data for {name} events."
+        self.owner = owner
+        self.callbacks_list = []
+        self._ready = True
+    
+    def __del__(self):
+        self.callbacks_list = []
+        self._ready = False
+    
+    def __call__(self, *args):
+        """
+        Notify listeners of an event.
+        """
+        if not self._ready:
+            return object.__call__(self, *args)
+        notify_callback(self.callbacks_list, *args)
+
+    def __iadd__(self, callback):
+        """
+        Subscribe a callback for the events.
+        """
+        register_callback(self.callbacks_list, callback)
+        return self
+
+
 #------------------------------------------------------------------------------
 # Module Reloading
 #------------------------------------------------------------------------------
@@ -109,15 +143,15 @@ def _recurseive_reload(module, target_name, visited):
     ignore = ["__builtins__", "__cached__", "__doc__", "__file__", "__loader__", "__name__", "__package__", "__spec__", "__path__"]
     
     visited[module.__name__] = module
-
+    
     for attribute_name in dir(module):
-
+        
         # skip the stuff we don't care about
         if attribute_name in ignore:
             continue
 
         attribute_value = getattr(module, attribute_name)
-
+        
         if type(attribute_value) == ModuleType:
             attribute_module_name = attribute_value.__name__
             attribute_module = attribute_value
@@ -130,8 +164,9 @@ def _recurseive_reload(module, target_name, visited):
             #print("TODO: should probably try harder to reload this...", attribute_name, type(attribute_value))
             continue
         else:
-            #print("UNKNOWN TYPE TO RELOAD", attribute_name, type(attribute_value))
-            raise ValueError("OH NOO RELOADING IS HARD")
+            print("**** OH NOO RELOADING IS HARD - UNKNOWN TYPE", attribute_name, type(attribute_value))
+            attribute_module_name = attribute_value.__class__.__name__
+            attribute_module = attribute_value.__class__.__module__
 
         if not target_name in attribute_module_name:
             #print(" - Not a module of interest...")

@@ -15,7 +15,7 @@ def get_microcode(func, maturity):
     hf = ida_hexrays.hexrays_failure_t()
     ml = ida_hexrays.mlist_t()
     ida_hexrays.mark_cfunc_dirty(func.start_ea)
-    mba = ida_hexrays.gen_microcode(mbr, hf, ml, ida_hexrays.DECOMP_NO_WAIT, maturity)
+    mba = ida_hexrays.gen_microcode(mbr, hf, ml, ida_hexrays.DECOMP_NO_WAIT | ida_hexrays.DECOMP_ALL_BLKS, maturity)
     if not mba:
         print("0x%08X: %s" % (hf.errea, hf.desc()))
         return None
@@ -51,6 +51,54 @@ def get_all_vdui():
 MMAT = sorted([(getattr(ida_hexrays, x), x) for x in filter(lambda y: y.startswith('MMAT_'), dir(ida_hexrays))])[1:]
 MOPT = [(getattr(ida_hexrays, x), x) for x in filter(lambda y: y.startswith('mop_'), dir(ida_hexrays))]
 MCODE = sorted([(getattr(ida_hexrays, x), x) for x in filter(lambda y: y.startswith('m_'), dir(ida_hexrays))])
+
+MBL_TYPE_NAMES = {
+    ida_hexrays.BLT_NONE: "????",
+    ida_hexrays.BLT_STOP: "STOP",
+    ida_hexrays.BLT_0WAY: "0WAY",
+    ida_hexrays.BLT_1WAY: "1WAY",
+    ida_hexrays.BLT_2WAY: "2WAY",
+    ida_hexrays.BLT_NWAY: "NWAY",
+    ida_hexrays.BLT_XTRN: "XTRN",
+}
+
+MBL_PROP_NAMES = {
+    ida_hexrays.MBL_PRIV: "PRIVATE",
+    ida_hexrays.MBL_FAKE: "FAKE",
+    ida_hexrays.MBL_NORET: "NORET",
+    ida_hexrays.MBL_DSLOT: "DSLOT",
+    ida_hexrays.MBL_GOTO: "GOTO",
+    ida_hexrays.MBL_TCAL: "TAILCALL",
+}
+
+MBL_FLAG_NAMES = {
+    ida_hexrays.MBL_KEEP: "KEEP",
+    ida_hexrays.MBL_PROP: "PROP",
+    ida_hexrays.MBL_COMB: "COMB",
+    ida_hexrays.MBL_PUSH: "PUSH",
+    ida_hexrays.MBL_CALL: "CALL",
+    ida_hexrays.MBL_DMT64: "DMT_64BIT",
+    ida_hexrays.MBL_INCONST: "INCONST",
+    ida_hexrays.MBL_BACKPROP: "BACKPROP",
+    ida_hexrays.MBL_VALRANGES: "VALRANGES",
+}
+
+IPROP_FLAG_NAMES = {
+    ida_hexrays.IPROP_ASSERT: "ASSERT",
+    ida_hexrays.IPROP_PERSIST: "PERSIST",
+    ida_hexrays.IPROP_MBARRIER: "MBARRIER",
+    ida_hexrays.IPROP_OPTIONAL: "OPT",
+    ida_hexrays.IPROP_COMBINED: "COMB",
+    ida_hexrays.IPROP_DONT_PROP: "NO_PROP",
+    ida_hexrays.IPROP_DONT_COMB: "NO_COMB",
+    ida_hexrays.IPROP_INV_JX: "INV_JX",
+    ida_hexrays.IPROP_FPINSN: "FPINSN",
+    ida_hexrays.IPROP_EXTSTX: "EXTSTX",
+    ida_hexrays.IPROP_FARCALL: "FARCALL",
+    ida_hexrays.IPROP_TAILCALL: "TAILCALL",
+    ida_hexrays.IPROP_MULTI_MOV: "MULTI_MOV",
+    ida_hexrays.IPROP_WAS_NORET: "WAS_NORET",
+}
 
 class MatDelta:
     INCREASING = 1

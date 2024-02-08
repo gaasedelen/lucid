@@ -11,9 +11,10 @@ from PyQt5 import QtWidgets, QtGui, QtCore, sip
 
 from lucid.ui.sync import MicroCursorHighlight
 from lucid.ui.subtree import MicroSubtreeView
-from lucid.util.python import register_callback, notify_callback
+from lucid.util.python import register_callback, notify_callback, CallbackHandler
 from lucid.util.hexrays import get_microcode, get_mmat, get_mmat_name, get_mmat_levels 
-from lucid.microtext import MicrocodeText, MicroInstructionToken, MicroOperandToken, AddressToken, BlockNumberToken, translate_mtext_position, remap_mtext_position
+from lucid.util.options import OptionListener, OptionProvider
+from lucid.microtext import MicrocodeOptions, MicrocodeText, MicroInstructionToken, MicroOperandToken, AddressToken, BlockNumberToken, translate_mtext_position, remap_mtext_position
 
 #------------------------------------------------------------------------------
 # Microcode Explorer
@@ -35,10 +36,19 @@ class MicrocodeExplorer(object):
     """
     
     def __init__(self):
+        self.graph = None
         self.model = MicrocodeExplorerModel()
         self.view = MicrocodeExplorerView(self, self.model)
         self.view._code_sync.enable_sync(True) # XXX/HACK
-
+    
+    def unload(self):
+        if self.graph:
+            self.graph.Close()
+            del self.graph
+        
+        self.view.unload()
+        self.model.unload()
+    
     def show(self, address=None):
         """
         Show the microcode explorer.
@@ -52,13 +62,27 @@ class MicrocodeExplorer(object):
         """
         Show the sub-instruction graph for the given instruction token.
         """
-        graph = MicroSubtreeView(insn_token.insn)
+        if self.graph:
+            self.graph.show()
+            return
+        
+        graph = MicroSubtreeView(insn_token.insn, self)
         graph.show()
-
-        # TODO/HACK: this is dumb, but moving it breaks my centering code so
-        # i'll figure it out later...
-        gv = ida_graph.get_graph_viewer(graph.GetWidget())
-        ida_graph.viewer_set_titlebar_height(gv, 15)
+        
+        self.graph = graph
+    
+    def update_subtree(self):
+        """
+        Updates the sub-instruction graph if it is currently opened.
+        """
+        if self.graph:
+            self.graph.update_insn()
+    
+    def free_subtree(self):
+        """
+        Frees references to the sub-instruction graph.
+        """
+        self.graph = None
 
     #-------------------------------------------------------------------------
     # View Toggles
@@ -74,12 +98,13 @@ class MicrocodeExplorer(object):
             self.view._code_sync.unhook()
         ida_kernwin.refresh_idaview_anyway()
 
-    def set_verbose(self, status):
+    def set_option(self, name, value):
         """
-        Toggle the verbosity of the printed microcode text.
+        Sets the named microcode option with the given value.
         """
-        self.model.verbose = status
-        ida_kernwin.refresh_idaview_anyway()
+        if not isinstance(name, str):
+            raise TypeError(name)
+        MicrocodeOptions[name] = value
     
     #-------------------------------------------------------------------------
     # View Controls
@@ -94,37 +119,35 @@ class MicrocodeExplorer(object):
             return False
         
         for maturity in get_mmat_levels():
-            mba = get_microcode(func, maturity)
-            mtext = MicrocodeText(mba, self.model.verbose)
-            self.model.update_mtext(mtext, maturity)
+            self.model.init_function(func, maturity)
 
         self.view.refresh()
         ida_kernwin.refresh_idaview_anyway()
         return True
 
-    def select_maturity(self, maturity_name):
+    def select_maturity(self, maturity):
         """
         Switch the microcode view to the specified maturity level.
         """
-        self.model.active_maturity = get_mmat(maturity_name)
-        #self.view.refresh()
+        self.model.active_maturity = maturity
 
     def select_address(self, address):
         """
         Select a token in the microcode view matching the given address.
         """
-        tokens = self.model.mtext.get_tokens_for_address(address)
-        if not tokens:
+        token = self.model.mtext.get_first_token_for_address(address)
+        if not token:
             return None
 
-        token_line_num, token_x = self.model.mtext.get_pos_of_token(tokens[0])
+        token_line_num, token_x = self.model.mtext.get_pos_of_token(token)
         rel_y = self.model.current_position[2]
 
-        if self.model.current_position[2] == 0:
+        if rel_y == 0:
             rel_y = 30
 
-        self.model.current_position = (token_line_num, token_x, rel_y)
-        return tokens[0]
+        self.select_position(token_line_num, token_x, rel_y)
+        
+        return token
 
     def select_position(self, line_num, x, y):
         """
@@ -140,18 +163,34 @@ class MicrocodeExplorer(object):
         Activate (eg. double click) the given text position in the microcode view.
         """
         token = self.model.mtext.get_token_at_position(line_num, x)
+        if not token:
+            return
 
         if isinstance(token, AddressToken):
             ida_kernwin.jumpto(token.target_address, -1, 0)
-            return
-
-        if isinstance(token, BlockNumberToken) or (isinstance(token, MicroOperandToken) and token.mop.t == ida_hexrays.mop_b):
-            blk_idx = token.blk_idx if isinstance(token, BlockNumberToken) else token.mop.b
+        else:
+            blk_idx = None
+            
+            if isinstance(token, BlockNumberToken):
+                blk_idx = token.blk_idx
+            elif isinstance(token, MicroOperandToken) and token.mop.t == ida_hexrays.mop_b:
+                blk_idx = token.mop.b
+            
+            if blk_idx is None:
+                return
+            
             blk_token = self.model.mtext.blks[blk_idx]
             blk_line_num, _ = self.model.mtext.get_pos_of_token(blk_token.lines[0])
-            self.model.current_position = (blk_line_num, 0, y)
-            self.view._code_view.Jump(*self.model.current_position) 
-            return
+            
+            self.select_position(blk_line_num, 0, y)
+    
+    def regenerate_microtext(self):
+        self.model.queue_rebuild(active_only=False)
+        self.view.refresh()
+    
+    def synchronize_microtext(self, vdui: ida_hexrays.vdui_t):
+        address = vdui.cfunc.entry_ea
+        self.select_function(address)
 
 class MicrocodeExplorerModel(object):
     """
@@ -163,7 +202,7 @@ class MicrocodeExplorerModel(object):
     """
 
     def __init__(self):
-
+        
         #
         # 'mtext' is short for MicrocodeText objects (see microtext.py)
         #
@@ -193,28 +232,41 @@ class MicrocodeExplorerModel(object):
         #
 
         self._active_maturity = ida_hexrays.MMAT_GENERATED
-
-        # this flag tracks the verbosity toggle state
-        self._verbose = False
+        
+        self._rebuild_queue = {x: False for x in get_mmat_levels()}
+        self._refresh_queue = {x: False for x in get_mmat_levels()}
 
         #----------------------------------------------------------------------
         # Callbacks
         #----------------------------------------------------------------------
-
-        self._mtext_refreshed_callbacks = []
-        self._position_changed_callbacks = []
-        self._maturity_changed_callbacks = []
+        
+        self.mtext_changed = CallbackHandler(self, name="mtext changed")
+        self.position_changed = CallbackHandler(self, name="position changed")
+        self.maturity_changed = CallbackHandler(self, name="maturity changed")
+    
+    def unload(self):
+        del self.maturity_changed
+        del self.position_changed
+        del self.mtext_changed
     
     #-------------------------------------------------------------------------
     # Read-Only Properties
     #-------------------------------------------------------------------------
 
     @property
-    def mtext(self):
+    def mtext(self) -> MicrocodeText:
         """
         Return the microcode text mapping for the current maturity level.
         """
         return self._mtext[self._active_maturity]
+
+    @mtext.setter
+    def mtext(self, mtext):
+        """
+        Set the microcode text mapping for the current maturity level.
+        """
+        self._mtext[self._active_maturity] = mtext
+        self.mtext_changed()
 
     @property
     def current_line(self):
@@ -265,6 +317,9 @@ class MicrocodeExplorerModel(object):
         """
         Return the current viewport cursor position (line_num, view_x, view_y).
         """
+        if not self.current_cursor:
+            return (0, 0, 0) # lol
+        
         return self.current_cursor.viewport_position
 
     @current_position.setter
@@ -273,28 +328,7 @@ class MicrocodeExplorerModel(object):
         Set the cursor position of the viewport.
         """
         self._gen_cursors(value, self.active_maturity)
-        self._notify_position_changed()
-
-    @property
-    def verbose(self):
-        """
-        Return the microcode verbosity status of the viewport.
-        """
-        return self._verbose
-
-    @verbose.setter
-    def verbose(self, value):
-        """
-        Set the verbosity of the microcode displayed by the viewport.
-        """
-        if self._verbose == value:
-            return
-
-        # update the active verbosity setting
-        self._verbose = value
-
-        # verbosity must have changed, so force a mtext refresh
-        self.refresh_mtext()
+        self.position_changed()
     
     @property
     def active_maturity(self):
@@ -308,68 +342,149 @@ class MicrocodeExplorerModel(object):
         """
         Set the active microcode maturity level.
         """
+        old_maturity = self._active_maturity
+        if new_maturity == old_maturity:
+            return
+        
         self._active_maturity = new_maturity
-        self._notify_maturity_changed()
+        self.maturity_changed(old_maturity)
 
     #----------------------------------------------------------------------
     # Misc
     #----------------------------------------------------------------------
-
+    
+    def queue_rebuild(self, active_only = False):
+        if not active_only:
+            # queue all maturities for a full rebuild
+            # they will only be rebuilt once active
+            for maturity in get_mmat_levels():
+                self._rebuild_queue[maturity] = True
+        else:
+            # force the active maturity to be rebuilt
+            self._rebuild_queue[self.active_maturity] = True
+    
+    def queue_refresh(self, active_only = False):
+        if not active_only:
+            # queue all maturities for a full rebuild
+            # they will only be rebuilt once active
+            for maturity in get_mmat_levels():
+                self._refresh_queue[maturity] = True
+        else:
+            # force the active maturity to be rebuilt
+            self._refresh_queue[self.active_maturity] = True
+    
+    def init_function(self, func, maturity):
+        mtext = MicrocodeText.create(func, maturity)
+        self.update_mtext(mtext, maturity)
+    
     def update_mtext(self, mtext, maturity):
         """
         Set the mtext for a given microcode maturity level.
         """
         self._mtext[maturity] = mtext
+        self._rebuild_queue[maturity] = True # needs to be generated
         self._view_cursors[maturity] = ViewCursor(0, 0, 0)
-
-    def refresh_mtext(self):
+    
+    def redraw_mtext(self, maturity):
         """
-        Regenerate the rendered text for all microcode maturity levels.
-
-        TODO: This is a bit sloppy, and is basically only used for the
-        verbosity toggle.
+        Redraws the rendered text for the microcode maturity level.
         """
-        for maturity, mtext in self._mtext.items():
-            if maturity == self.active_maturity:
-                new_mtext = MicrocodeText(mtext.mba, self.verbose)
-                self._mtext[maturity] = new_mtext
-                self.current_position = translate_mtext_position(self.current_position, mtext, new_mtext)
+        if maturity != self.active_maturity:
+            return False # XXX: Performance optimization.
+        
+        self._mtext[maturity].refresh()
+        self._refresh_queue[maturity] = False
+        
+        return True
+    
+    def rebuild_mtext(self, maturity):
+        """
+        Regenerate the rendered text for the microcode maturity level.
+        """
+        if maturity != self.active_maturity:
+            return False # XXX: Performance optimization.
+        
+        if maturity in self._rebuild_queue:
+            # fully rebuild our active maturity
+            self.mtext.reinit()
+            self._rebuild_queue[maturity] = False
+            self._refresh_queue[maturity] = False # no need to redraw since it was rebuilt
+        else:
+            # make a new copy of it and translate the active cursor
+            # this will ensure a proper refresh of the microcode
+            old_mtext = self.mtext
+            new_mtext = old_mtext.copy()
+            self.update_mtext(new_mtext, maturity)
+            self.current_position = translate_mtext_position(self.current_position, old_mtext, new_mtext)
+        
+        return True
+    
+    def refresh_mtext(self, old_maturity = None):
+        """
+        Updates the rendered text for the microcode as needed.
+        """
+        for maturity, needs_rebuild in self._rebuild_queue.items():
+            if not needs_rebuild:
                 continue
-            mtext.refresh(self.verbose)
-        self._notify_mtext_refreshed()
-
+            self.rebuild_mtext(maturity)
+        for maturity, needs_redraw in self._refresh_queue.items():
+            if not needs_redraw:
+                continue
+            self.redraw_mtext(maturity)
+        
+        if old_maturity is None:
+            # we don't need to move the cursor since no other maturities are loaded
+            return
+        
+        # transition from this maturity to the next one
+        self._transfer_cursor(old_maturity, self.active_maturity)    
+        
     def _gen_cursors(self, position, mmat_src):
         """
         Generate the cursors for all levels from a source position and maturity.
         """
-        mmat_levels = get_mmat_levels()
-        mmat_first, mmat_final = mmat_levels[0], mmat_levels[-1]
-
-        # clear out all the existing cursor mappings 
-        self._view_cursors = {x: None for x in mmat_levels}
-
+        mmat_levels = []
+        
+        for maturity, mtext in self._mtext.items():
+            if not mtext or mtext.is_pending():
+                continue
+            mmat_levels.append(maturity)
+        
+        if not mmat_levels:
+            return
+        
+        mmat_first = mmat_levels[0]
+        mmat_final = mmat_levels[-1]
+        
+        #print(f"**** MATURITY: first={mmat_first}, final={mmat_final}")
+        #print(f" - levels: [{','.join([str(n) for n in mmat_levels])}]")
+        
         # save the starting cursor
-        line_num, x, y = position 
+        line_num, x, y = position
+        
+        # clear out all the existing cursor mappings 
+        self._view_cursors = {x: None for x in get_mmat_levels()}        
         self._view_cursors[mmat_src] = ViewCursor(line_num, x, y, True)
-
+        
         # map the cursor backwards from the source maturity
-        mmat_lower = range(mmat_first, mmat_src)[::-1]
-        current_maturity = mmat_src
-        for next_maturity in mmat_lower:
-            self._transfer_cursor(current_maturity, next_maturity)
-            current_maturity = next_maturity
-
+        mmat_lower = [mmat for mmat in range(mmat_first, mmat_src) if mmat in mmat_levels][::-1]
+        
         # map the cursor forward from the source maturity
-        mmat_higher = range(mmat_src+1, mmat_final + 1)
-        current_maturity = mmat_src
-        for next_maturity in mmat_higher:
-            self._transfer_cursor(current_maturity, next_maturity)
-            current_maturity = next_maturity
+        mmat_higher = [mmat for mmat in range(mmat_src+1, mmat_final+1) if mmat in mmat_levels]
+        
+        for mmat_range in (mmat_lower, mmat_higher):
+            current_maturity = mmat_src
+            for next_maturity in mmat_range:
+                self._transfer_cursor(current_maturity, next_maturity)
+                current_maturity = next_maturity
 
     def _transfer_cursor(self, mmat_src, mmat_dst):
         """
         Translate the cursor position from one maturity to the next.
         """
+        if self._mtext[mmat_src].is_pending() or self._mtext[mmat_dst].is_pending():
+            return
+        
         position = self._view_cursors[mmat_src].viewport_position
         mapped = self._view_cursors[mmat_src].mapped
 
@@ -389,64 +504,41 @@ class MicrocodeExplorerModel(object):
     # Callbacks
     #----------------------------------------------------------------------
 
-    def mtext_refreshed(self, callback):
-        """
-        Subscribe a callback for mtext refresh events.
-        """
-        register_callback(self._mtext_refreshed_callbacks, callback)
-
-    def _notify_mtext_refreshed(self):
-        """
-        Notify listeners of a mtext refresh event.
-        """
-        notify_callback(self._mtext_refreshed_callbacks)
-
-    def position_changed(self, callback):
-        """
-        Subscribe a callback for cursor position changed events.
-        """
-        register_callback(self._position_changed_callbacks, callback)
-
-    def _notify_position_changed(self):
-        """
-        Notify listeners of a cursor position changed event.
-        """
-        notify_callback(self._position_changed_callbacks)
-
-    def maturity_changed(self, callback):
-        """
-        Subscribe a callback for maturity changed events.
-        """
-        register_callback(self._maturity_changed_callbacks, callback)
-
-    def _notify_maturity_changed(self):
-        """
-        Notify listeners of a maturity changed event.
-        """
-        notify_callback(self._maturity_changed_callbacks)
 
 #-----------------------------------------------------------------------------
 # UI Components
 #-----------------------------------------------------------------------------
 
-class MicrocodeExplorerView(QtWidgets.QWidget):
+class MicrocodeExplorerView(OptionListener, QtWidgets.QWidget, providers = [ MicrocodeOptions ]):
     """
     The view component of the Microcode Explorer.
     """
 
     WINDOW_TITLE = "Microcode Explorer"
 
-    def __init__(self, controller, model):
+    def __init__(self, controller: MicrocodeExplorer, model: MicrocodeExplorerModel):
         super(MicrocodeExplorerView, self).__init__()
         self.visible = False
 
         # the backing model, and controller for this view (eg, mvc pattern)
         self.model = model
         self.controller = controller
-        
+
         # initialize the plugin UI
         self._ui_init()
         self._ui_init_signals()
+    
+    def unload(self):
+        ida_kernwin.close_widget(self._twidget, ida_kernwin.PluginForm.WCLS_DELETE_LATER)
+        self._cleanup_hooks()
+    
+    def notify_change(self, option_name, option_value, **kwargs):
+        """
+        Implementation of OptionListener.notify_change for when a microcode option has been updated.
+        """
+        #print(f"**** notify_change {option_name} = {option_value} (IN OPTIONS={bool(option_name in MicrocodeOptions)})")
+        self.model.queue_refresh()
+        self.refresh()
 
     #--------------------------------------------------------------------------
     # Pseudo Widget Functions
@@ -462,12 +554,15 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
 
         self._code_sync.hook()
 
+    def _cleanup_hooks(self):
+        self._code_sync.unhook()
+        self._ui_hooks.unhook()
+    
     def _cleanup(self):
         self.visible = False
         self._twidget = None
         self.widget = None
-        self._code_sync.unhook()
-        self._ui_hooks.unhook()
+        self._cleanup_hooks()
         # TODO cleanup controller / model
 
     #--------------------------------------------------------------------------
@@ -505,9 +600,22 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
                 if twidget == self._twidget:
                     self.visible = False
                     self._cleanup()
+                    self.notify_deletion() #XXX/HACK: sigh...
             def widget_visible(_, twidget):
                 if twidget == self._twidget:
                     self.visible = True
+                    self.notify_creation() #XXX/HACK: sigh...
+            def postprocess_action(_, *args):
+                # XXX: seemingly the only way to allow the explorer to navigate via keyboard events...
+                # (maybe this should be hooked elsewhere?)
+                if not self._code_view or not self._code_view.IsFocused():
+                    return
+                
+                old_line = self.model.current_line
+                new_line = self._code_view.GetLineNo()
+            
+                if new_line != old_line:
+                    self.controller.select_position(*self._code_view.GetPos())
 
         # install the widget lifetime hooks 
         self._ui_hooks = ExplorerUIHooks()
@@ -525,7 +633,7 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
         """
         self._code_view = MicrocodeView(self.model)
         self._code_sync = MicroCursorHighlight(self.controller, self.model)
-        self._code_sync.track_view(self._code_view.widget)
+        self._code_sync.track_view(self._code_view)
 
     def _ui_init_settings(self):
         """
@@ -536,12 +644,19 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
         self._checkbox_verbose = QtWidgets.QCheckBox("Show use/def")
         self._checkbox_sync = QtWidgets.QCheckBox("Sync hexrays")
         self._checkbox_sync.setCheckState(QtCore.Qt.Checked)
+        self._checkbox_devmode = QtWidgets.QCheckBox("Developer mode")
+        
+        
+        self._refresh_button = QtWidgets.QPushButton("Refresh view")
+        self._refresh_button.setFixedSize(120, 60)
         
         self._groupbox_settings = QtWidgets.QGroupBox("Settings")
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self._checkbox_cursor)
         layout.addWidget(self._checkbox_verbose)
         layout.addWidget(self._checkbox_sync)
+        layout.addWidget(self._checkbox_devmode)
+        layout.addWidget(self._refresh_button)
         self._groupbox_settings.setLayout(layout)
 
     def _ui_layout(self):
@@ -562,29 +677,51 @@ class MicrocodeExplorerView(QtWidgets.QWidget):
         """
         Connect UI signals.
         """
-        self._maturity_list.currentItemChanged.connect(lambda x, y: self.controller.select_maturity(x.text()))
+        
+        def _maturity_changed(item):
+            maturity = self._maturity_list.row(item) + 1
+            self.controller.select_maturity(maturity)
+        
+        
+        self._maturity_list.currentItemChanged.connect(_maturity_changed)
         self._code_view.connect_signals(self.controller)
         self._code_view.OnClose = self.hide # HACK
+        
+        self._refresh_button.clicked.connect(lambda: self.reinit())
 
         # checkboxes
         self._checkbox_cursor.stateChanged.connect(lambda x: self.controller.set_highlight_mutual(bool(x)))
-        self._checkbox_verbose.stateChanged.connect(lambda x: self.controller.set_verbose(bool(x)))
+        self._checkbox_verbose.stateChanged.connect(lambda x: self.controller.set_option('verbose', bool(x)))
         self._checkbox_sync.stateChanged.connect(lambda x: self._code_sync.enable_sync(bool(x)))
+        self._checkbox_devmode.stateChanged.connect(lambda x: self.controller.set_option('developer_mode', bool(x)))
+
+        if MicrocodeOptions.verbose:
+            self._checkbox_verbose.setCheckState(QtCore.Qt.Checked)
+        if MicrocodeOptions.developer_mode:
+            self._checkbox_devmode.setCheckState(QtCore.Qt.Checked)
 
         # model signals
-        self.model.mtext_refreshed(self.refresh)
-        self.model.maturity_changed(self.refresh)
-    
+        self.model.mtext_changed += self.reinit
+        self.model.maturity_changed += self.refresh
+        
     #--------------------------------------------------------------------------
     # Misc
     #--------------------------------------------------------------------------
 
-    def refresh(self):
+    def reinit(self):
+        """
+        Fully reinitializes the microcode explorer UI based on the model state.
+        """
+        self.model.queue_rebuild(active_only=True)
+        self.refresh()
+    
+    def refresh(self, old_maturity = None):
         """
         Refresh the microcode explorer UI based on the model state.
         """
-        self._maturity_list.setCurrentRow(self.model.active_maturity - 1)
+        self.model.refresh_mtext(old_maturity=old_maturity)
         self._code_view.refresh()
+        self.controller.update_subtree()
 
 class LayerListWidget(QtWidgets.QListWidget):
     """
@@ -638,13 +775,16 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
     def __init__(self, model):
         super(MicrocodeView, self).__init__()
         self.model = model
+        self.new_line = None
         self.Create()
 
     def connect_signals(self, controller):
         self.controller = controller
         self.OnCursorPosChanged = lambda: controller.select_position(*self.GetPos())
         self.OnDblClick = lambda _: controller.activate_position(*self.GetPos())
-        self.model.position_changed(self.refresh_cursor)
+        
+        self.model.position_changed += self.refresh_cursor
+        self.model.position_changed += self.controller.update_subtree
 
     def refresh(self):
         self.ClearLines()
@@ -653,7 +793,7 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
         self.refresh_cursor()
 
     def refresh_cursor(self):
-        if not self.model.current_position:
+        if not self.model.current_cursor or not self.model.current_position:
             return
         self.Jump(*self.model.current_position)
 
@@ -672,7 +812,7 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
 
     def OnDblClick(self, shift):
         pass
-
+    
     def OnPopup(self, form, popup_handle):
         controller = self.controller
 
