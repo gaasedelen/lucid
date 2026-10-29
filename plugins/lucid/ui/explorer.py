@@ -662,7 +662,57 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
             return False
         self._twidget = self.GetWidget()
         self.widget = ida_kernwin.PluginForm.TWidgetToPyQtWidget(self._twidget)
+
+        # The custom viewer supports text selection, but because it is embedded
+        # in our own widget its default Copy action is not available. Bind one
+        # directly to the viewer (and its children) so Ctrl+C behaves as users
+        # expect without replacing the interactive IDA viewer.
+        self._copy_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence.Copy,
+            self.widget
+        )
+        self._copy_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self._copy_shortcut.activated.connect(self.copy_selection)
         return True
+
+    def _get_selected_text(self):
+        """
+        Return the untagged text selected in the custom viewer.
+        """
+        selection = self.GetSelection()
+        if not selection:
+            return None
+
+        x1, y1, x2, y2 = selection
+        if (y2, x2) < (y1, x1):
+            x1, y1, x2, y2 = x2, y2, x1, y1
+
+        lines = [line.text for line in self.model.mtext.lines]
+        if not lines or y1 < 0 or y2 >= len(lines):
+            return None
+
+        if y1 == y2:
+            return lines[y1][x1:x2]
+
+        selected_lines = [lines[y1][x1:]]
+        selected_lines.extend(lines[y1 + 1:y2])
+        selected_lines.append(lines[y2][:x2])
+        return "\n".join(selected_lines)
+
+    def copy_selection(self):
+        """
+        Copy the selected microcode text to the system clipboard.
+        """
+        text = self._get_selected_text()
+        if text:
+            QtWidgets.QApplication.clipboard().setText(text)
+
+    def copy_all(self):
+        """
+        Copy all rendered microcode text to the system clipboard.
+        """
+        text = "\n".join(line.text for line in self.model.mtext.lines)
+        QtWidgets.QApplication.clipboard().setText(text)
 
     def OnClose(self):
         pass
@@ -708,10 +758,18 @@ class MicrocodeView(ida_kernwin.simplecustviewer_t):
         self.filter = FilterMenu(qmenu)
         qmenu.installEventFilter(self.filter)
 
+        # Clipboard actions apply to every line, including block headers and
+        # annotations that do not contain a micro-instruction token.
+        copy_action = qmenu.addAction("Copy")
+        copy_action.setEnabled(self.GetSelection() is not None)
+        copy_action.triggered.connect(self.copy_selection)
+        copy_all_action = qmenu.addAction("Copy all")
+        copy_all_action.triggered.connect(self.copy_all)
+
         # only handle right clicks on lines containing micro instructions
         ins_token = self.model.mtext.get_ins_for_line(self.model.current_line)
         if not ins_token:
-            return False
+            return True
 
         class MyHandler(ida_kernwin.action_handler_t):
             def activate(self, ctx):
